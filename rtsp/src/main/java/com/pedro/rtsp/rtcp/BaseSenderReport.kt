@@ -54,6 +54,17 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
 
   companion object {
     /**
+     * Seconds between the NTP epoch (1900-01-01) and the Unix epoch (1970-01-01).
+     *
+     * RFC 3550 §4 defines the Sender Report's NTP timestamp field on the 1900 epoch,
+     * while every clock available here counts from 1970. Omitting this offset makes a
+     * receiver that honours the field place the stream seventy years in the past —
+     * FFmpeg reports a `start_time_realtime` of -2208988800 s and any sanity check
+     * rejects it.
+     */
+    private const val NTP_EPOCH_OFFSET_SECONDS = 2_208_988_800L
+
+    /**
      * Wall-clock source for the NTP field of RTCP Sender Reports, in nanoseconds since
      * the Unix epoch. Defaults to the device clock, so behaviour is unchanged unless a
      * caller replaces it.
@@ -206,7 +217,7 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
   private fun setData(buffer: ByteArray, ntpts: Long, rtpts: Long) {
     val hb = ntpts / 1000000000
     val lb = (ntpts - hb * 1000000000) * 4294967296L / 1000000000
-    buffer.setLong(hb, 8, 12)
+    buffer.setLong(hb + NTP_EPOCH_OFFSET_SECONDS, 8, 12)
     buffer.setLong(lb, 12, 16)
     buffer.setLong(rtpts, 16, 20)
   }
