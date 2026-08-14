@@ -67,7 +67,8 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int iFrameInterval = 2;
   private long firstTimestamp = 0;
 
-  private long firstFrameElapsedRealtimeNs = 0;
+  private volatile long lastFramePtsUs = 0;
+  private volatile long lastFrameElapsedRealtimeNs = 0;
 
   /**
    * Absolute presentation time of the first encoded frame, in microseconds, as the
@@ -80,27 +81,35 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   }
 
   /**
-   * CLOCK_BOOTTIME reading taken when the first frame was encoded, in nanoseconds.
+   * Rebased PTS of the most recently encoded frame, in microseconds. Pairs with
+   * {@link #getLastFrameElapsedRealtimeNs()}.
+   */
+  public long getLastFramePtsUs() {
+    return lastFramePtsUs;
+  }
+
+  /**
+   * CLOCK_BOOTTIME reading taken when the most recent frame was encoded, in nanoseconds.
    *
-   * This is the anchor that turns a relative PTS back into an absolute instant:
-   * {@code capture ≈ firstFrameElapsedRealtimeNs + pts}. Emitted PTS are rebased to
+   * Together with {@link #getLastFramePtsUs()} this converts any PTS to an absolute
+   * instant: {@code t(pts) ≈ lastWall - (lastPts - pts)}. Emitted PTS are rebased to
    * start at zero (a raw source timestamp is a huge value that breaks RTMP), which alone
-   * cannot name a point in time.
+   * cannot name a point in time, and the source timeline carries no promise of sharing an
+   * origin with any system clock.
    *
-   * Deliberately measured here rather than derived from {@link #getFirstTimestamp()}.
-   * The source timeline is not guaranteed to share an origin with any system clock — on
-   * one device it ran 4 s behind CLOCK_BOOTTIME, enough to place frames seconds away
-   * from other sensors captured alongside them — and nothing in the API says otherwise.
-   * Sampling a known clock at a known frame costs one syscall per stream and cannot be
-   * wrong in that way.
+   * Updated every frame rather than once per stream on purpose. A single start-of-stream
+   * anchor is only valid while the PTS origin it was taken against still holds, and the
+   * two are assigned in different places — when they drift apart the result is a constant,
+   * plausible-looking offset (measured at 4 s, then 12 s) that is indistinguishable
+   * downstream from real latency.
    *
-   * Taken at the encoder output, so it excludes any downstream send queue and carries
+   * Sampled at the encoder output, so it excludes any downstream send queue and carries
    * only capture-to-encode latency.
    *
-   * @return the anchor in nanoseconds, or 0 before the first frame is encoded.
+   * @return the reading in nanoseconds, or 0 before the first frame is encoded.
    */
-  public long getFirstFrameElapsedRealtimeNs() {
-    return firstFrameElapsedRealtimeNs;
+  public long getLastFrameElapsedRealtimeNs() {
+    return lastFrameElapsedRealtimeNs;
   }
 
   //for disable video
@@ -235,7 +244,9 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   public void start(boolean resetTs) {
     if (resetTs) {
       firstTimestamp = 0;
-      firstFrameElapsedRealtimeNs = 0;
+      // Both halves of the PTS-to-wall-clock pairing are stale once the origin moves.
+      lastFramePtsUs = 0;
+      lastFrameElapsedRealtimeNs = 0;
     }
     forceKey = false;
     shouldReset = resetTs;
@@ -527,16 +538,19 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         // Surface mode: EGL timestamp is camera sensor time (nanoseconds from boot ÷ 1000).
         // It has clean, jitter-free intervals — but it's a huge absolute value that breaks RTMP.
         // Rebase to relative by subtracting the first frame's PTS → clean intervals, starts at 0.
-        if (firstTimestamp == 0) {
-          firstTimestamp = bufferInfo.presentationTimeUs;
-          firstFrameElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos();
-        }
+        if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
         bufferInfo.presentationTimeUs -= firstTimestamp;
       }
     } else {
       if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
       bufferInfo.presentationTimeUs -= firstTimestamp;
     }
+    // Single point where the emitted PTS is final, whichever branch produced it, so the
+    // pairing below cannot miss a mode. Recorded per frame rather than once at the start
+    // because a start-of-stream anchor goes stale the moment the PTS origin is reset
+    // without it, and the two are set in different places.
+    lastFramePtsUs = bufferInfo.presentationTimeUs;
+    lastFrameElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos();
     return checkValidTimeStamp(bufferInfo);
   }
 
