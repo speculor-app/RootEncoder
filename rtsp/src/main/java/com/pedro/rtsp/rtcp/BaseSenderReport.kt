@@ -53,6 +53,25 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
   private var ssrcAudio = 0L
 
   companion object {
+    /**
+     * Wall-clock source for the NTP field of RTCP Sender Reports, in nanoseconds since
+     * the Unix epoch. Defaults to the device clock, so behaviour is unchanged unless a
+     * caller replaces it.
+     *
+     * The Sender Report is what lets a receiver map RTP timestamps back to the time a
+     * frame was CAPTURED, and that is only as good as the clock behind it. A device
+     * clock can be far out: an Android phone measured against a disciplined reference
+     * was 250 ms off, enough to place its video a quarter second away from other
+     * sensors on the same device. Applications holding a better clock — PTP, NTP
+     * discipline, GNSS — can supply it here so the stream carries accurate capture
+     * times for every consumer, not only ones that know how to correct it.
+     *
+     * Must be cheap and non-blocking: called on the sender path once per report
+     * interval per track.
+     */
+    @JvmStatic
+    var ntpClockProvider: () -> Long = { TimeUtils.getCurrentTimeNano() }
+
     @JvmStatic
     fun getInstance(
       rtpTracks: RtpTracks,
@@ -141,7 +160,7 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     videoBuffer.setLong(videoOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - videoTime >= interval) {
       videoTime = TimeUtils.getCurrentTimeMillis()
-      setData(videoBuffer, TimeUtils.getCurrentTimeNano(), rtpFrame.timeStamp)
+      setData(videoBuffer, ntpClockProvider(), rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(videoBuffer, srtcpVideoIndex++, ssrcVideo, it), rtpFrame)
       } ?: sendReport(videoBuffer, rtpFrame)
@@ -158,7 +177,7 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     audioBuffer.setLong(audioOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - audioTime >= interval) {
       audioTime = TimeUtils.getCurrentTimeMillis()
-      setData(audioBuffer, TimeUtils.getCurrentTimeNano(), rtpFrame.timeStamp)
+      setData(audioBuffer, ntpClockProvider(), rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(audioBuffer, srtcpAudioIndex++, ssrcAudio, it), rtpFrame)
       } ?: sendReport(audioBuffer, rtpFrame)
