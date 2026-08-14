@@ -22,6 +22,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Pair;
 import android.view.Surface;
@@ -66,21 +67,40 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int iFrameInterval = 2;
   private long firstTimestamp = 0;
 
+  private long firstFrameElapsedRealtimeNs = 0;
+
   /**
    * Absolute presentation time of the first encoded frame, in microseconds, as the
-   * source produced it. In surface mode that is the camera sensor timestamp, so this is
-   * the epoch that turns the relative PTS carried by every later frame back into an
-   * absolute capture time.
-   *
-   * Emitted PTS are rebased to start at zero (a raw sensor timestamp is a huge value
-   * that breaks RTMP), which discards the only link between a frame and when the sensor
-   * actually saw it. Exposing the epoch restores it for callers that need capture time —
-   * anything correlating this video against other sensors on the same device.
+   * source produced it.
    *
    * @return the epoch in microseconds, or 0 before the first frame is encoded.
    */
   public long getFirstTimestamp() {
     return firstTimestamp;
+  }
+
+  /**
+   * CLOCK_BOOTTIME reading taken when the first frame was encoded, in nanoseconds.
+   *
+   * This is the anchor that turns a relative PTS back into an absolute instant:
+   * {@code capture ≈ firstFrameElapsedRealtimeNs + pts}. Emitted PTS are rebased to
+   * start at zero (a raw source timestamp is a huge value that breaks RTMP), which alone
+   * cannot name a point in time.
+   *
+   * Deliberately measured here rather than derived from {@link #getFirstTimestamp()}.
+   * The source timeline is not guaranteed to share an origin with any system clock — on
+   * one device it ran 4 s behind CLOCK_BOOTTIME, enough to place frames seconds away
+   * from other sensors captured alongside them — and nothing in the API says otherwise.
+   * Sampling a known clock at a known frame costs one syscall per stream and cannot be
+   * wrong in that way.
+   *
+   * Taken at the encoder output, so it excludes any downstream send queue and carries
+   * only capture-to-encode latency.
+   *
+   * @return the anchor in nanoseconds, or 0 before the first frame is encoded.
+   */
+  public long getFirstFrameElapsedRealtimeNs() {
+    return firstFrameElapsedRealtimeNs;
   }
 
   //for disable video
@@ -213,7 +233,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   @Override
   public void start(boolean resetTs) {
-    if (resetTs) firstTimestamp = 0;
+    if (resetTs) {
+      firstTimestamp = 0;
+      firstFrameElapsedRealtimeNs = 0;
+    }
     forceKey = false;
     shouldReset = resetTs;
     spsPpsSetted = false;
@@ -504,7 +527,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         // Surface mode: EGL timestamp is camera sensor time (nanoseconds from boot ÷ 1000).
         // It has clean, jitter-free intervals — but it's a huge absolute value that breaks RTMP.
         // Rebase to relative by subtracting the first frame's PTS → clean intervals, starts at 0.
-        if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
+        if (firstTimestamp == 0) {
+          firstTimestamp = bufferInfo.presentationTimeUs;
+          firstFrameElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos();
+        }
         bufferInfo.presentationTimeUs -= firstTimestamp;
       }
     } else {
