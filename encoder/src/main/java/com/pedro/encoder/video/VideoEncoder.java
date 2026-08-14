@@ -65,6 +65,24 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int rotation = 90;
   private int iFrameInterval = 2;
   private long firstTimestamp = 0;
+
+  /**
+   * Absolute presentation time of the first encoded frame, in microseconds, as the
+   * source produced it. In surface mode that is the camera sensor timestamp, so this is
+   * the epoch that turns the relative PTS carried by every later frame back into an
+   * absolute capture time.
+   *
+   * Emitted PTS are rebased to start at zero (a raw sensor timestamp is a huge value
+   * that breaks RTMP), which discards the only link between a frame and when the sensor
+   * actually saw it. Exposing the epoch restores it for callers that need capture time —
+   * anything correlating this video against other sensors on the same device.
+   *
+   * @return the epoch in microseconds, or 0 before the first frame is encoded.
+   */
+  public long getFirstTimestamp() {
+    return firstTimestamp;
+  }
+
   //for disable video
   private final FpsLimiter fpsLimiter = new FpsLimiter();
   private FormatVideoEncoder formatVideoEncoder = FormatVideoEncoder.YUV420Dynamical;

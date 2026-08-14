@@ -84,6 +84,15 @@ abstract class StreamBase(
   //video/audio record
   private var recordController: RecordController = AndroidMuxerRecordController()
   private val fpsListener = FpsListener()
+  /**
+   * Absolute source timestamp of the first encoded video frame, in microseconds — the
+   * camera sensor clock in surface mode. Frame PTS are rebased to start at zero, so this
+   * is what turns one back into an absolute capture time: capture = epoch + pts.
+   *
+   * 0 until the first frame is encoded. See VideoEncoder.getFirstTimestamp.
+   */
+  val videoCaptureEpochUs: Long get() = videoEncoder.firstTimestamp
+
   var isStreaming = false
     private set
   var isOnPreview = false

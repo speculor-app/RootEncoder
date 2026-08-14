@@ -66,22 +66,30 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
 
     /**
      * Wall-clock source for the NTP field of RTCP Sender Reports, in nanoseconds since
-     * the Unix epoch. Defaults to the device clock, so behaviour is unchanged unless a
-     * caller replaces it.
+     * the Unix epoch. Defaults to the device clock read now, which is the historical
+     * behaviour, so nothing changes unless a caller replaces it.
      *
      * The Sender Report is what lets a receiver map RTP timestamps back to the time a
-     * frame was CAPTURED, and that is only as good as the clock behind it. A device
-     * clock can be far out: an Android phone measured against a disciplined reference
-     * was 250 ms off, enough to place its video a quarter second away from other
-     * sensors on the same device. Applications holding a better clock — PTP, NTP
-     * discipline, GNSS — can supply it here so the stream carries accurate capture
-     * times for every consumer, not only ones that know how to correct it.
+     * frame was CAPTURED, and two things spoil that. One is the clock: a device clock
+     * measured 250 ms off a disciplined reference, enough to place video a quarter
+     * second away from other sensors on the same device. The other is *when* the clock
+     * is read — reports are written from the sender loop, after the frame has waited in
+     * the send queue, so pairing "now" with a frame encoded earlier overstates its age
+     * by the whole encode-and-queue latency. Measured on one 4K HEVC stream that was a
+     * further 680 ms.
+     *
+     * The parameter is the presentation time of the frame this report describes, in
+     * nanoseconds on the encoder's timeline (zero-based; add
+     * StreamBase.videoCaptureEpochUs to recover the absolute source timestamp). A
+     * caller that can convert it to a disciplined wall clock fixes both problems at
+     * once. Applied to the video track only: audio presentation times come from a
+     * different capture timeline, so the same conversion would not be valid for them.
      *
      * Must be cheap and non-blocking: called on the sender path once per report
-     * interval per track.
+     * interval.
      */
     @JvmStatic
-    var ntpClockProvider: () -> Long = { TimeUtils.getCurrentTimeNano() }
+    var ntpClockProvider: (framePtsNs: Long) -> Long = { TimeUtils.getCurrentTimeNano() }
 
     @JvmStatic
     fun getInstance(
@@ -171,7 +179,10 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     videoBuffer.setLong(videoOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - videoTime >= interval) {
       videoTime = TimeUtils.getCurrentTimeMillis()
-      setData(videoBuffer, ntpClockProvider(), rtpFrame.timeStamp)
+      // Recover the frame's presentation time from its RTP timestamp; the packetiser
+      // derived one from the other with this same clock rate.
+      val framePtsNs = rtpFrame.timeStamp * 1_000_000_000L / RtpConstants.clockVideoFrequency
+      setData(videoBuffer, ntpClockProvider(framePtsNs), rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(videoBuffer, srtcpVideoIndex++, ssrcVideo, it), rtpFrame)
       } ?: sendReport(videoBuffer, rtpFrame)
@@ -188,7 +199,9 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     audioBuffer.setLong(audioOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - audioTime >= interval) {
       audioTime = TimeUtils.getCurrentTimeMillis()
-      setData(audioBuffer, ntpClockProvider(), rtpFrame.timeStamp)
+      // Device clock, not ntpClockProvider: audio presentation times are on the capture
+      // timeline of AudioRecord, which the provider's conversion does not describe.
+      setData(audioBuffer, TimeUtils.getCurrentTimeNano(), rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(audioBuffer, srtcpAudioIndex++, ssrcAudio, it), rtpFrame)
       } ?: sendReport(audioBuffer, rtpFrame)
