@@ -44,7 +44,10 @@ abstract class BaseSender(
     protected abstract suspend fun onRun()
     protected abstract suspend fun stopImp(clear: Boolean = true)
 
-    fun sendMediaFrame(mediaFrame: MediaFrame) {
+    // open so a protocol can observe frames as they are queued. The queue is the only
+    // point that separates encode time from send time, and anything measuring capture
+    // time has to sit on this side of it.
+    open fun sendMediaFrame(mediaFrame: MediaFrame) {
         if (running && !queue.trySend(mediaFrame)) {
             when (mediaFrame.type) {
                 MediaFrame.Type.VIDEO -> {

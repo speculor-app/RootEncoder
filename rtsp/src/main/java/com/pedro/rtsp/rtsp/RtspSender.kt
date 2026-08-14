@@ -16,6 +16,7 @@
 
 package com.pedro.rtsp.rtsp
 
+import android.os.SystemClock
 import android.util.Log
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
@@ -51,6 +52,25 @@ class RtspSender(
   connectChecker: ConnectChecker,
   private val commandsManager: CommandsManager
 ): BaseSender(connectChecker, "RtspSender") {
+
+  /**
+   * Note when each video frame was handed over, before it enters the send queue.
+   *
+   * This has to happen here and not in the packetiser: getRtpPackets runs after
+   * queue.take(), so a reading taken there is a send-time reading and reproduces exactly
+   * the error the Sender Report hook exists to remove. The RTP timestamp is derived the
+   * same way the packetiser derives it, from the same field, so the two agree by
+   * construction rather than by assuming anything about shared origins.
+   */
+  override fun sendMediaFrame(mediaFrame: MediaFrame) {
+    if (mediaFrame.type == MediaFrame.Type.VIDEO) {
+      BaseSenderReport.noteVideoTimestamp(
+        mediaFrame.info.timestamp * RtpConstants.clockVideoFrequency / 1_000_000L,
+        SystemClock.elapsedRealtimeNanos(),
+      )
+    }
+    super.sendMediaFrame(mediaFrame)
+  }
 
   private var videoPacket: BasePacket = H264Packet(commandsManager.rtpTracks.trackVideo)
   private var audioPacket: BasePacket = AacPacket(commandsManager.rtpTracks.trackAudio)

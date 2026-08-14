@@ -16,9 +16,7 @@
 
 package com.pedro.rtsp.rtp.packets
 
-import android.os.SystemClock
 import com.pedro.common.frame.MediaFrame
-import com.pedro.rtsp.rtcp.BaseSenderReport
 import com.pedro.rtsp.rtsp.RtpFrame
 import com.pedro.rtsp.utils.CryptoProperties
 import com.pedro.rtsp.utils.CryptoUtils
@@ -74,15 +72,6 @@ abstract class BasePacket(private var clock: Long, private val payloadType: Int)
   protected fun updateTimeStamp(buffer: ByteArray, timestamp: Long): Long {
     val ts = timestamp * clock / 1000000000L
     buffer.setLong(ts, 4, 8)
-    if (clock == RtpConstants.clockVideoFrequency) {
-      // Pair the RTP timestamp with a wall clock here, where the packet is built. This
-      // is the only place both are known together: the RTP timeline is rebased per RTSP
-      // session while the encoder's PTS is not, so anything that assumes they share an
-      // origin is wrong by however long the encoder ran before this session — measured
-      // at 88 s. Packetisation happens before the send queue, so the reading carries
-      // capture-to-encode latency only.
-      BaseSenderReport.noteVideoTimestamp(ts, SystemClock.elapsedRealtimeNanos())
-    }
     return ts
   }
 
