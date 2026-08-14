@@ -78,18 +78,54 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
      * by the whole encode-and-queue latency. Measured on one 4K HEVC stream that was a
      * further 680 ms.
      *
-     * The parameter is the presentation time of the frame this report describes, in
-     * nanoseconds on the encoder's timeline (zero-based; add
-     * StreamBase.videoCaptureEpochUs to recover the absolute source timestamp). A
-     * caller that can convert it to a disciplined wall clock fixes both problems at
-     * once. Applied to the video track only: audio presentation times come from a
-     * different capture timeline, so the same conversion would not be valid for them.
+     * The parameter is when this report's frame was captured, as a CLOCK_BOOTTIME
+     * reading in nanoseconds, or 0 if no frame has been packetised yet. A caller holding
+     * a disciplined clock converts that instead of reading its own clock, which fixes
+     * both problems at once.
+     *
+     * Applied to the video track only: audio is packetised on a different capture
+     * timeline, so the same conversion would not be valid for it.
      *
      * Must be cheap and non-blocking: called on the sender path once per report
      * interval.
      */
     @JvmStatic
-    var ntpClockProvider: (framePtsNs: Long) -> Long = { TimeUtils.getCurrentTimeNano() }
+    var ntpClockProvider: (captureElapsedRealtimeNs: Long) -> Long =
+        { TimeUtils.getCurrentTimeNano() }
+
+    // RTP timestamp of the most recently packetised video frame, paired with the
+    // CLOCK_BOOTTIME reading taken as it was built. Written on the encoder/packetiser
+    // thread and read on the sender thread; @Volatile on each is enough because a torn
+    // pair costs one report's accuracy, never correctness, and locking a per-packet path
+    // to protect a 3-second report would be the wrong trade.
+    @Volatile
+    @JvmStatic
+    private var lastVideoRtpTs: Long = 0
+
+    @Volatile
+    @JvmStatic
+    private var lastVideoWallNs: Long = 0
+
+    /**
+     * Record when a video frame was packetised. Called from the packetiser, which is the
+     * only place the RTP timestamp and a wall clock are known together — the RTP timeline
+     * is rebased per RTSP session while the encoder's is not, so no shared origin exists
+     * to derive one from the other.
+     */
+    @JvmStatic
+    fun noteVideoTimestamp(rtpTs: Long, elapsedRealtimeNs: Long) {
+      lastVideoRtpTs = rtpTs
+      lastVideoWallNs = elapsedRealtimeNs
+    }
+
+    /** Capture instant of [rtpTs] on CLOCK_BOOTTIME, or 0 before any frame is seen. */
+    @JvmStatic
+    private fun captureTimeOf(rtpTs: Long): Long {
+      val wall = lastVideoWallNs
+      if (wall == 0L) return 0
+      val deltaNs = (rtpTs - lastVideoRtpTs) * 1_000_000_000L / RtpConstants.clockVideoFrequency
+      return wall + deltaNs
+    }
 
     @JvmStatic
     fun getInstance(
@@ -179,10 +215,8 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     videoBuffer.setLong(videoOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - videoTime >= interval) {
       videoTime = TimeUtils.getCurrentTimeMillis()
-      // Recover the frame's presentation time from its RTP timestamp; the packetiser
-      // derived one from the other with this same clock rate.
-      val framePtsNs = rtpFrame.timeStamp * 1_000_000_000L / RtpConstants.clockVideoFrequency
-      setData(videoBuffer, ntpClockProvider(framePtsNs), rtpFrame.timeStamp)
+      setData(videoBuffer, ntpClockProvider(captureTimeOf(rtpFrame.timeStamp)),
+              rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(videoBuffer, srtcpVideoIndex++, ssrcVideo, it), rtpFrame)
       } ?: sendReport(videoBuffer, rtpFrame)

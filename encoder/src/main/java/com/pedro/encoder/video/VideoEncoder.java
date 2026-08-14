@@ -22,7 +22,6 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.SystemClock;
 import android.util.Log;
 import android.util.Pair;
 import android.view.Surface;
@@ -66,52 +65,6 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int rotation = 90;
   private int iFrameInterval = 2;
   private long firstTimestamp = 0;
-
-  private volatile long lastFramePtsUs = 0;
-  private volatile long lastFrameElapsedRealtimeNs = 0;
-
-  /**
-   * Absolute presentation time of the first encoded frame, in microseconds, as the
-   * source produced it.
-   *
-   * @return the epoch in microseconds, or 0 before the first frame is encoded.
-   */
-  public long getFirstTimestamp() {
-    return firstTimestamp;
-  }
-
-  /**
-   * Rebased PTS of the most recently encoded frame, in microseconds. Pairs with
-   * {@link #getLastFrameElapsedRealtimeNs()}.
-   */
-  public long getLastFramePtsUs() {
-    return lastFramePtsUs;
-  }
-
-  /**
-   * CLOCK_BOOTTIME reading taken when the most recent frame was encoded, in nanoseconds.
-   *
-   * Together with {@link #getLastFramePtsUs()} this converts any PTS to an absolute
-   * instant: {@code t(pts) ≈ lastWall - (lastPts - pts)}. Emitted PTS are rebased to
-   * start at zero (a raw source timestamp is a huge value that breaks RTMP), which alone
-   * cannot name a point in time, and the source timeline carries no promise of sharing an
-   * origin with any system clock.
-   *
-   * Updated every frame rather than once per stream on purpose. A single start-of-stream
-   * anchor is only valid while the PTS origin it was taken against still holds, and the
-   * two are assigned in different places — when they drift apart the result is a constant,
-   * plausible-looking offset (measured at 4 s, then 12 s) that is indistinguishable
-   * downstream from real latency.
-   *
-   * Sampled at the encoder output, so it excludes any downstream send queue and carries
-   * only capture-to-encode latency.
-   *
-   * @return the reading in nanoseconds, or 0 before the first frame is encoded.
-   */
-  public long getLastFrameElapsedRealtimeNs() {
-    return lastFrameElapsedRealtimeNs;
-  }
-
   //for disable video
   private final FpsLimiter fpsLimiter = new FpsLimiter();
   private FormatVideoEncoder formatVideoEncoder = FormatVideoEncoder.YUV420Dynamical;
@@ -242,12 +195,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   @Override
   public void start(boolean resetTs) {
-    if (resetTs) {
-      firstTimestamp = 0;
-      // Both halves of the PTS-to-wall-clock pairing are stale once the origin moves.
-      lastFramePtsUs = 0;
-      lastFrameElapsedRealtimeNs = 0;
-    }
+    if (resetTs) firstTimestamp = 0;
     forceKey = false;
     shouldReset = resetTs;
     spsPpsSetted = false;
@@ -545,12 +493,6 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
       bufferInfo.presentationTimeUs -= firstTimestamp;
     }
-    // Single point where the emitted PTS is final, whichever branch produced it, so the
-    // pairing below cannot miss a mode. Recorded per frame rather than once at the start
-    // because a start-of-stream anchor goes stale the moment the PTS origin is reset
-    // without it, and the two are set in different places.
-    lastFramePtsUs = bufferInfo.presentationTimeUs;
-    lastFrameElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos();
     return checkValidTimeStamp(bufferInfo);
   }
 

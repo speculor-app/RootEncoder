@@ -84,21 +84,6 @@ abstract class StreamBase(
   //video/audio record
   private var recordController: RecordController = AndroidMuxerRecordController()
   private val fpsListener = FpsListener()
-  /**
-   * PTS of the most recently encoded video frame (µs) paired with the CLOCK_BOOTTIME
-   * reading taken as it was encoded (ns), or null before the first frame.
-   *
-   * Converts any PTS to an absolute instant: t(pts) = wall - (lastPts - pts). Read the
-   * pair together — separately they can straddle a reset. See
-   * VideoEncoder.getLastFrameElapsedRealtimeNs for why this is per-frame and measured
-   * rather than a single anchor derived from the source's own timeline.
-   */
-  val videoPtsClockPair: Pair<Long, Long>?
-    get() {
-      val wall = videoEncoder.lastFrameElapsedRealtimeNs
-      return if (wall == 0L) null else Pair(videoEncoder.lastFramePtsUs, wall)
-    }
-
   var isStreaming = false
     private set
   var isOnPreview = false
