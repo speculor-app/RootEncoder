@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-package com.pedro.rtsp.rtsp
+package com.pedro.common.nal
 
 import com.pedro.common.VideoCodec
+
 
 /**
  * Builds an unregistered SEI NAL carrying the absolute capture time of a frame.
@@ -39,7 +40,28 @@ import com.pedro.common.VideoCodec
 object CaptureTimeSei {
 
   /** Identifies our payload among any other unregistered SEI in the stream. */
-  private val UUID = "SPC-CAPTURE-TIME".toByteArray(Charsets.US_ASCII)
+  val UUID = "SPC-CAPTURE-TIME".toByteArray(Charsets.US_ASCII)
+
+  /**
+   * True when this NAL body is a capture-time SEI produced by [build].
+   *
+   * Needed because the packetiser strips SEI wholesale to save bandwidth, which would
+   * silently discard the timestamps too — built correctly, then dropped one step later,
+   * with nothing on either side to show where they went.
+   *
+   * @param nal NAL unit body including its header, positioned at byte 0
+   * @param headerSize 1 for H.264, 2 for H.265
+   */
+  fun isCaptureTimeSei(nal: java.nio.ByteBuffer, headerSize: Int): Boolean {
+    // header, payload_type, payload_size, then the UUID
+    val uuidAt = headerSize + 2
+    if (nal.remaining() < uuidAt + UUID.size) return false
+    if (nal.get(headerSize).toInt() != PAYLOAD_TYPE_USER_DATA_UNREGISTERED) return false
+    for (i in UUID.indices) {
+      if (nal.get(uuidAt + i) != UUID[i]) return false
+    }
+    return true
+  }
 
   private const val PAYLOAD_TYPE_USER_DATA_UNREGISTERED = 5
 

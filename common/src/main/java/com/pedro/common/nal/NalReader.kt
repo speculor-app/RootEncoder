@@ -62,15 +62,20 @@ object NalReader {
     return units
   }
 
+  // SEI is stripped wholesale to save bandwidth. The one exception is a capture-time
+  // SEI, which exists precisely to reach the receiver — dropping it here discards the
+  // timestamp after the sender has already built it, invisibly to both ends.
   private fun shouldKeepNal(nal: ByteBuffer, codec: VideoCodec, shouldDiscardVideoInfo: Boolean): Boolean {
     return when (codec) {
       VideoCodec.H264 -> {
         val type = (nal.get(0) and 0x1F).toInt()
+        if (type == H264_SEI && CaptureTimeSei.isCaptureTimeSei(nal, 1)) return true
         !(type == H264_SEI || type == H264_AUD ||
             (shouldDiscardVideoInfo && (type == H264_SPS || type == H264_PPS)))
       }
       VideoCodec.H265 -> {
         val type = nal.get(0).toInt().shr(1) and 0x3F
+        if (type == H265_PRE_SEI && CaptureTimeSei.isCaptureTimeSei(nal, 2)) return true
         !(type == H265_PRE_SEI || type == H265_SU_SEI || type == H265_AUD ||
             (shouldDiscardVideoInfo && (type == H265_SPS || type == H265_PPS || type == H265_VPS)))
       }
