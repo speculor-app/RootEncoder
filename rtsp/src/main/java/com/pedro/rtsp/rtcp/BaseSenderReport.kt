@@ -125,9 +125,12 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
      * Must be cheap and non-blocking: called on the sender path once per report
      * interval.
      */
+    /** The historical behaviour, and the marker for "no caller has supplied a clock". */
     @JvmStatic
-    var ntpClockProvider: (captureElapsedRealtimeNs: Long) -> Long =
-        { TimeUtils.getCurrentTimeNano() }
+    val deviceClockProvider: (Long) -> Long = { TimeUtils.getCurrentTimeNano() }
+
+    @JvmStatic
+    var ntpClockProvider: (captureElapsedRealtimeNs: Long) -> Long = deviceClockProvider
 
     @JvmStatic
     fun getInstance(

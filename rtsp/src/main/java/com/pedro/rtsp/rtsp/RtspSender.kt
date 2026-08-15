@@ -63,15 +63,39 @@ class RtspSender(
    * construction rather than by assuming anything about shared origins.
    */
   override fun sendMediaFrame(mediaFrame: MediaFrame) {
-    if (mediaFrame.type == MediaFrame.Type.VIDEO) {
-      // This sender's own report: frame timestamps are rebased per connection, so the
-      // pairing is only meaningful to the client it came from.
-      baseSenderReport?.noteVideoTimestamp(
-        mediaFrame.info.timestamp * RtpConstants.clockVideoFrequency / 1_000_000L,
-        SystemClock.elapsedRealtimeNanos(),
-      )
+    if (mediaFrame.type != MediaFrame.Type.VIDEO) {
+      super.sendMediaFrame(mediaFrame)
+      return
     }
-    super.sendMediaFrame(mediaFrame)
+    val captureNs = SystemClock.elapsedRealtimeNanos()
+    // This sender's own report: frame timestamps are rebased per connection, so the
+    // pairing is only meaningful to the client it came from.
+    baseSenderReport?.noteVideoTimestamp(
+      mediaFrame.info.timestamp * RtpConstants.clockVideoFrequency / 1_000_000L,
+      captureNs,
+    )
+    super.sendMediaFrame(withCaptureTimeSei(mediaFrame, captureNs))
+  }
+
+  /**
+   * Prepend a capture-time SEI to the access unit, taken here because this is the last
+   * point before the send queue — a reading taken after it measures how long the frame
+   * waited, not when it was captured.
+   *
+   * Returns the frame unchanged when no provider is installed, so the default build
+   * emits an unmodified bitstream.
+   */
+  private fun withCaptureTimeSei(mediaFrame: MediaFrame, captureNs: Long): MediaFrame {
+    val provider = BaseSenderReport.ntpClockProvider
+    if (provider === BaseSenderReport.deviceClockProvider) return mediaFrame
+    val sei = CaptureTimeSei.build(commandsManager.videoCodec, provider(captureNs))
+      ?: return mediaFrame
+    val src = mediaFrame.data
+    val merged = ByteBuffer.allocate(sei.size + src.remaining())
+    merged.put(sei)
+    merged.put(src.duplicate())
+    merged.flip()
+    return MediaFrame(merged, mediaFrame.info, mediaFrame.type)
   }
 
   private var videoPacket: BasePacket = H264Packet(commandsManager.rtpTracks.trackVideo)
