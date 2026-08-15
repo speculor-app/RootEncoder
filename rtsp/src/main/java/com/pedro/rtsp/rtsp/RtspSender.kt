@@ -19,6 +19,7 @@ package com.pedro.rtsp.rtsp
 import android.os.SystemClock
 import android.util.Log
 import com.pedro.common.AudioCodec
+import com.pedro.common.CaptureLatency
 import com.pedro.common.ConnectChecker
 import com.pedro.common.VideoCodec
 import com.pedro.common.base.BaseSender
@@ -69,7 +70,12 @@ class RtspSender(
       super.sendMediaFrame(mediaFrame)
       return
     }
-    val captureNs = SystemClock.elapsedRealtimeNanos()
+    // Step back from "now" to when the camera actually exposed this frame. We are called
+    // as the encoded frame is handed over, which is already the encoder's output delay
+    // after capture — measured ~225 ms on a 4K HEVC stream, about seven frames. The
+    // encoder publishes 0 when it cannot vouch for the measurement, which leaves the
+    // handover time and the previous, merely-late behaviour.
+    val captureNs = SystemClock.elapsedRealtimeNanos() - CaptureLatency.lastNs
     // This sender's own report: frame timestamps are rebased per connection, so the
     // pairing is only meaningful to the client it came from.
     baseSenderReport?.noteVideoTimestamp(

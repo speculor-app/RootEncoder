@@ -22,6 +22,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Pair;
 import android.view.Surface;
@@ -29,6 +30,7 @@ import android.view.Surface;
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
+import com.pedro.common.CaptureLatency;
 import com.pedro.common.TimeUtils;
 import com.pedro.encoder.BaseEncoder;
 import com.pedro.encoder.Frame;
@@ -195,7 +197,11 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   @Override
   public void start(boolean resetTs) {
-    if (resetTs) firstTimestamp = 0;
+    if (resetTs) {
+      firstTimestamp = 0;
+      // The measurement belongs to the timeline that produced it.
+      CaptureLatency.reset();
+    }
     forceKey = false;
     shouldReset = resetTs;
     spsPpsSetted = false;
@@ -486,6 +492,13 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         // Surface mode: EGL timestamp is camera sensor time (nanoseconds from boot ÷ 1000).
         // It has clean, jitter-free intervals — but it's a huge absolute value that breaks RTMP.
         // Rebase to relative by subtracting the first frame's PTS → clean intervals, starts at 0.
+        //
+        // Measure the output delay before rebasing discards the absolute value: it is the
+        // only moment the source's own timestamp and a system clock are both in hand.
+        // CaptureLatency rejects anything implausible, so a source timeline that does not
+        // share an origin with the system clock reports unknown rather than nonsense.
+        CaptureLatency.report(
+            SystemClock.elapsedRealtimeNanos() - bufferInfo.presentationTimeUs * 1000L);
         if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
         bufferInfo.presentationTimeUs -= firstTimestamp;
       }
