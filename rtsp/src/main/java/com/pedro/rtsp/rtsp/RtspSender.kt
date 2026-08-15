@@ -64,7 +64,9 @@ class RtspSender(
    */
   override fun sendMediaFrame(mediaFrame: MediaFrame) {
     if (mediaFrame.type == MediaFrame.Type.VIDEO) {
-      BaseSenderReport.noteVideoTimestamp(
+      // This sender's own report: frame timestamps are rebased per connection, so the
+      // pairing is only meaningful to the client it came from.
+      baseSenderReport?.noteVideoTimestamp(
         mediaFrame.info.timestamp * RtpConstants.clockVideoFrequency / 1_000_000L,
         SystemClock.elapsedRealtimeNanos(),
       )
