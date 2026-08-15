@@ -90,7 +90,17 @@ class RtspSender(
     val provider = BaseSenderReport.ntpClockProvider
     if (provider === BaseSenderReport.deviceClockProvider) return mediaFrame
     val sei = CaptureTimeSei.build(commandsManager.videoCodec, provider(captureNs))
-      ?: return mediaFrame
+    if (sei == null) {
+      if (!seiUnsupportedLogged) {
+        seiUnsupportedLogged = true
+        Log.w(TAG, "capture-time SEI unsupported for codec ${commandsManager.videoCodec}")
+      }
+      return mediaFrame
+    }
+    if (!seiLogged) {
+      seiLogged = true
+      Log.i(TAG, "capture-time SEI: ${sei.size} bytes, codec ${commandsManager.videoCodec}")
+    }
     // Build from the payload Info describes, not from the whole buffer, and restate the
     // size. The packetiser slices by offset/size, so reusing the original Info would cut
     // exactly the SEI's length off the tail of every frame — which decodes as a stream
@@ -106,6 +116,9 @@ class RtspSender(
       mediaFrame.type,
     )
   }
+
+  private var seiLogged = false
+  private var seiUnsupportedLogged = false
 
   private var videoPacket: BasePacket = H264Packet(commandsManager.rtpTracks.trackVideo)
   private var audioPacket: BasePacket = AacPacket(commandsManager.rtpTracks.trackAudio)
