@@ -90,7 +90,13 @@ class RtspSender(
   private fun withCaptureTimeSei(mediaFrame: MediaFrame, captureNs: Long): MediaFrame {
     val provider = BaseSenderReport.ntpClockProvider
     if (provider === BaseSenderReport.deviceClockProvider) return mediaFrame
-    val sei = CaptureTimeSei.build(commandsManager.videoCodec, provider(captureNs))
+    // 0 means the caller has no trustworthy time yet. Send nothing rather than a
+    // plausible wrong one: a receiver cannot tell an undisciplined timestamp from a
+    // disciplined one, and will act on it. Absent, it falls back to its own arrival
+    // clock and is merely late.
+    val captureUtcNs = provider(captureNs)
+    if (captureUtcNs <= 0L) return mediaFrame
+    val sei = CaptureTimeSei.build(commandsManager.videoCodec, captureUtcNs)
     if (sei == null) {
       if (!seiUnsupportedLogged) {
         seiUnsupportedLogged = true

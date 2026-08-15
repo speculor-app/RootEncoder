@@ -100,6 +100,11 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
      */
     private const val NTP_EPOCH_OFFSET_SECONDS = 2_208_988_800L
 
+    /** The historical behaviour, and the marker for "no caller has supplied a clock". */
+    @JvmStatic
+    val deviceClockProvider: (Long) -> Long = { TimeUtils.getCurrentTimeNano() }
+
+
     /**
      * Wall-clock source for the NTP field of RTCP Sender Reports, in nanoseconds since
      * the Unix epoch. Defaults to the device clock read now, which is the historical
@@ -119,16 +124,17 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
      * a disciplined clock converts that instead of reading its own clock, which fixes
      * both problems at once.
      *
+     * Return 0 to say "no trustworthy time yet" — while a time source is still settling,
+     * for instance. Reports then fall back to the device clock and no capture-time SEI is
+     * emitted, so a receiver treats the stream as undisciplined rather than acting on a
+     * confident wrong answer.
+     *
      * Applied to the video track only: audio is packetised on a different capture
      * timeline, so the same conversion would not be valid for it.
      *
      * Must be cheap and non-blocking: called on the sender path once per report
      * interval.
      */
-    /** The historical behaviour, and the marker for "no caller has supplied a clock". */
-    @JvmStatic
-    val deviceClockProvider: (Long) -> Long = { TimeUtils.getCurrentTimeNano() }
-
     @JvmStatic
     var ntpClockProvider: (captureElapsedRealtimeNs: Long) -> Long = deviceClockProvider
 
@@ -220,8 +226,11 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     videoBuffer.setLong(videoOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - videoTime >= interval) {
       videoTime = TimeUtils.getCurrentTimeMillis()
-      setData(videoBuffer, ntpClockProvider(captureTimeOf(rtpFrame.timeStamp)),
-              rtpFrame.timeStamp)
+      // 0 from the provider means it has no trustworthy time yet; the device clock is
+      // then no worse than the historical behaviour and better than a wrong absolute.
+      val supplied = ntpClockProvider(captureTimeOf(rtpFrame.timeStamp))
+      val ntp = if (supplied > 0L) supplied else TimeUtils.getCurrentTimeNano()
+      setData(videoBuffer, ntp, rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(videoBuffer, srtcpVideoIndex++, ssrcVideo, it), rtpFrame)
       } ?: sendReport(videoBuffer, rtpFrame)
