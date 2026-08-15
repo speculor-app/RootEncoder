@@ -24,6 +24,7 @@ import com.pedro.common.VideoCodec
 import com.pedro.common.base.BaseSender
 import com.pedro.common.frame.MediaFrame
 import com.pedro.common.onMainThread
+import com.pedro.common.removeInfo
 import com.pedro.common.socket.base.SocketType
 import com.pedro.common.socket.base.TcpStreamSocket
 import com.pedro.common.validMessage
@@ -90,12 +91,20 @@ class RtspSender(
     if (provider === BaseSenderReport.deviceClockProvider) return mediaFrame
     val sei = CaptureTimeSei.build(commandsManager.videoCodec, provider(captureNs))
       ?: return mediaFrame
-    val src = mediaFrame.data
-    val merged = ByteBuffer.allocate(sei.size + src.remaining())
+    // Build from the payload Info describes, not from the whole buffer, and restate the
+    // size. The packetiser slices by offset/size, so reusing the original Info would cut
+    // exactly the SEI's length off the tail of every frame — which decodes as a stream
+    // that only advances on keyframes while still reporting full frame rate.
+    val payload = mediaFrame.data.removeInfo(mediaFrame.info)
+    val merged = ByteBuffer.allocate(sei.size + payload.remaining())
     merged.put(sei)
-    merged.put(src.duplicate())
+    merged.put(payload)
     merged.flip()
-    return MediaFrame(merged, mediaFrame.info, mediaFrame.type)
+    return MediaFrame(
+      merged,
+      mediaFrame.info.copy(offset = 0, size = merged.remaining()),
+      mediaFrame.type,
+    )
   }
 
   private var videoPacket: BasePacket = H264Packet(commandsManager.rtpTracks.trackVideo)
