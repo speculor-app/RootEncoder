@@ -89,6 +89,15 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var aspectRatioMode = AspectRatioMode.Adjust
   private var executor: ExecutorService? = null
   private val fpsLimiter = FpsLimiter()
+  // Only the PREVIEW surface belongs to the display, and swapping it blocks on
+  // vsync — on this shared thread that paces the encoder to the panel's refresh, so
+  // a 120 fps capture records at 60. The offscreen render below still runs every
+  // frame; just the on-screen swap is capped. The viewfinder only has to look
+  // continuous, and the cost it stops paying is GPU time on every captured frame.
+  // 0 disables the cap.
+  private var lastPreviewNs = 0L
+  var previewFpsCap = 30
+    set(value) { field = value; lastPreviewNs = 0L }
   private val forceRender = ForceRenderer()
   var autoHandleOrientation = false
   private var shouldHandleOrientation = true
@@ -328,10 +337,16 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
         mainRender.drawFilters(true)
         surfaceManager.swapBuffer()
       }
-      if (surfaceManagerPreview.makeCurrent()) {
-        mainRender.drawScreenPreview(w, h, orientationPreview, aspectRatioMode, previewOrientation,
-          isPreviewVerticalFlip, isPreviewHorizontalFlip, previewViewPort)
-        surfaceManagerPreview.swapBuffer()
+      // Gated here and nowhere else: the offscreen swap above must keep running
+      // every frame or the whole pipeline loses its pacing.
+      val interval = if (previewFpsCap > 0) 1_000_000_000L / previewFpsCap else 0L
+      if (timestamp - lastPreviewNs >= interval) {
+        lastPreviewNs = timestamp
+        if (surfaceManagerPreview.makeCurrent()) {
+          mainRender.drawScreenPreview(w, h, orientationPreview, aspectRatioMode, previewOrientation,
+            isPreviewVerticalFlip, isPreviewHorizontalFlip, previewViewPort)
+          surfaceManagerPreview.swapBuffer()
+        }
       }
     }
     // render extra multi-preview surfaces (using independent configuration from PreviewSurfaceInfo)
