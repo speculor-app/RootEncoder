@@ -20,6 +20,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
@@ -123,6 +124,12 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
 
     private var customCaptureCompletedCallback: ((session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) -> Unit)? = null
 
+    // Rates above 30 live behind a constrained high-speed session on every device
+    // that offers them: a different session type, a burst request list rather than a
+    // single repeating request, and at most two targets. Set while preparing, because
+    // that is where both the resolution and the rate are known.
+    private var highSpeed = false
+
     init {
         cameraId = try { getCameraIdForFacing(Facing.BACK) } catch (_: Exception) { "0" }
     }
@@ -133,6 +140,8 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         surfaceTexture.setDefaultBufferSize(optimalResolution.width, optimalResolution.height)
         this.surfaceEncoder = Surface(surfaceTexture)
         this.fps = fps
+        highSpeed = getHighSpeedFps(optimalResolution, facing).any { it.upper == fps }
+        if (highSpeed) Log.i(TAG, "high speed session: ${optimalResolution.width}x${optimalResolution.height}@$fps")
         isPrepared = true
     }
 
@@ -157,7 +166,10 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         try {
             val listSurfaces = mutableListOf<Surface>()
             listSurfaces.add(surfaceEncoder)
-            imageReader?.let { listSurfaces.add(it.surface) }
+            // A high-speed session takes at most two targets and no still/YUV reader,
+            // so the frame-capture surface is dropped rather than failing the whole
+            // configuration.
+            if (!highSpeed) imageReader?.let { listSurfaces.add(it.surface) }
             val captureRequest = drawSurface(cameraDevice, listSurfaces)
             createCaptureSession(
                 cameraDevice,
@@ -165,11 +177,15 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
                 onConfigured = {
                     cameraCaptureSession = it
                     try {
-                        it.setRepeatingRequest(
-                            captureRequest,
-                            if (faceDetectionEnabled || frameCapturedCallback != null || customCaptureCompletedCallback != null) cb else null,
-                            cameraHandler
-                        )
+                        val listener = if (faceDetectionEnabled || frameCapturedCallback != null || customCaptureCompletedCallback != null) cb else null
+                        if (highSpeed && it is CameraConstrainedHighSpeedCaptureSession) {
+                            // High-speed capture is delivered as a batch: the session
+                            // expands one request into the list it will actually run,
+                            // and rejects a plain repeating request.
+                            it.setRepeatingBurst(it.createHighSpeedRequestList(captureRequest), listener, cameraHandler)
+                        } else {
+                            it.setRepeatingRequest(captureRequest, listener, cameraHandler)
+                        }
                     } catch (_: IllegalStateException) {
                         reOpenCamera(cameraId)
                     } catch (e: Exception) {
@@ -199,7 +215,11 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         val builderInputSurface = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         for (surface in surfaces) builderInputSurface.addTarget(surface)
         builderInputSurface.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-        if (dynamicFps) adaptFpsRangeDynamic(fps, builderInputSurface) else adaptFpsRange(fps, builderInputSurface)
+        // A high-speed session accepts only a range it advertised, and the encoder is
+        // fed a fixed rate, so the exact [fps, fps] pair is the one to ask for —
+        // nearest-match would silently hand back 30.
+        if (highSpeed) builderInputSurface.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
+        else if (dynamicFps) adaptFpsRangeDynamic(fps, builderInputSurface) else adaptFpsRange(fps, builderInputSurface)
         this.builderInputSurface = builderInputSurface
         return builderInputSurface.build()
     }
@@ -268,6 +288,35 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         callback: ((CameraCaptureSession, CaptureRequest, TotalCaptureResult) -> Unit)?
     ) {
         this.customCaptureCompletedCallback = callback
+    }
+
+    /** Resolutions the camera will run a constrained high-speed session at. */
+    fun getHighSpeedSizes(facing: Facing): List<Size> {
+        return try {
+            val characteristics = cameraManager.getCameraCharacteristics(getCameraIdForFacing(facing))
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            map?.highSpeedVideoSizes?.toList() ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * High-speed rates for one resolution. Separate from [getSupportedFps], which
+     * reports the AE ranges of the ordinary session and therefore never exceeds what
+     * the normal path sustains — 30 on every device seen so far.
+     */
+    fun getHighSpeedFps(size: Size, facing: Facing): List<Range<Int>> {
+        return try {
+            val characteristics = cameraManager.getCameraCharacteristics(getCameraIdForFacing(facing))
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            if (map?.highSpeedVideoSizes?.contains(size) != true) return emptyList()
+            map.getHighSpeedVideoFpsRangesFor(size).toList()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error", e)
+            emptyList()
+        }
     }
 
     fun getSupportedFps(size: Size?, facing: Facing): List<Range<Int>> {
@@ -1040,7 +1089,9 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
                 onConfiguredFailed(cameraCaptureSession)
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        if (highSpeed) {
+            cameraDevice.createConstrainedHighSpeedCaptureSession(surfaces, callback, handler)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val configurations = surfaces.map { OutputConfiguration(it) }
             configurations.forEach { it.setPhysicalCameraId(physicalCameraId) }
             val config = SessionConfiguration(
