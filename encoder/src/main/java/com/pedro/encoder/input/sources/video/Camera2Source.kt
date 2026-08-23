@@ -186,6 +186,9 @@ class Camera2Source(context: Context): VideoSource() {
 
   fun getCurrentCameraId() = camera.getCurrentCameraId()
 
+  /** Whether the session now running is the constrained high-speed one. */
+  fun isHighSpeedActive() = camera.highSpeedActive
+
   fun openCameraId(id: String) {
     if (isRunning()) camera.reOpenCamera(id)
   }

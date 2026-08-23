@@ -130,6 +130,18 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     // that is where both the resolution and the rate are known.
     private var highSpeed = false
 
+    /** Size the last full prepare settled on, so a reopen can decide again. */
+    private var preparedSize: Size? = null
+
+    /**
+     * Whether the session that got configured really is the constrained
+     * high-speed one. The request is not the outcome: a size or rate the module
+     * does not carry configures an ordinary session instead, at a third of the
+     * rate, and only the session object reports which one was built.
+     */
+    var highSpeedActive: Boolean = false
+        private set
+
     init {
         cameraId = try { getCameraIdForFacing(Facing.BACK) } catch (_: Exception) { "0" }
     }
@@ -140,13 +152,19 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         surfaceTexture.setDefaultBufferSize(optimalResolution.width, optimalResolution.height)
         this.surfaceEncoder = Surface(surfaceTexture)
         this.fps = fps
-        highSpeed = getHighSpeedFps(optimalResolution, facing).any { it.upper == fps }
+        preparedSize = optimalResolution
+        highSpeed = supportsHighSpeed(cameraId, optimalResolution, fps)
         if (highSpeed) Log.i(TAG, "high speed session: ${optimalResolution.width}x${optimalResolution.height}@$fps")
         isPrepared = true
     }
 
     fun prepareCamera(surfaceTexture: SurfaceTexture, width: Int, height: Int, fps: Int, facing: Facing) {
         this.facing = facing
+        // Resolve the module the open will actually land on. Deciding the session
+        // type from `facing` alone consults the FIRST camera with that facing,
+        // which is a different module from the tele or ultra-wide being opened —
+        // and they do not carry the same high-speed configurations.
+        runCatching { this.cameraId = getCameraIdForFacing(facing) }
         prepareCamera(surfaceTexture, width, height, fps)
     }
 
@@ -178,6 +196,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
                     cameraCaptureSession = it
                     try {
                         val listener = if (faceDetectionEnabled || frameCapturedCallback != null || customCaptureCompletedCallback != null) cb else null
+                        highSpeedActive = highSpeed && it is CameraConstrainedHighSpeedCaptureSession
                         if (highSpeed && it is CameraConstrainedHighSpeedCaptureSession) {
                             // High-speed capture is delivered as a batch: the session
                             // expands one request into the list it will actually run,
@@ -307,9 +326,13 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
      * reports the AE ranges of the ordinary session and therefore never exceeds what
      * the normal path sustains — 30 on every device seen so far.
      */
-    fun getHighSpeedFps(size: Size, facing: Facing): List<Range<Int>> {
+    fun getHighSpeedFps(size: Size, facing: Facing): List<Range<Int>> =
+        getHighSpeedFps(getCameraIdForFacing(facing), size)
+
+    /** High-speed rates one module advertises for one size. */
+    fun getHighSpeedFps(cameraId: String, size: Size): List<Range<Int>> {
         return try {
-            val characteristics = cameraManager.getCameraCharacteristics(getCameraIdForFacing(facing))
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             if (map?.highSpeedVideoSizes?.contains(size) != true) return emptyList()
             map.getHighSpeedVideoFpsRangesFor(size).toList()
@@ -318,6 +341,9 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
             emptyList()
         }
     }
+
+    private fun supportsHighSpeed(cameraId: String, size: Size, fps: Int): Boolean =
+        getHighSpeedFps(cameraId, size).any { it.upper == fps }
 
     fun getSupportedFps(size: Size?, facing: Facing): List<Range<Int>> {
         try {
@@ -893,6 +919,13 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         if (cameraDevice != null) {
             closeCamera(false)
             prepareCamera(surfaceEncoder, fps)
+            // The surface-only prepare above carries neither size nor module, so
+            // the session type would otherwise be whatever the last FULL prepare
+            // decided. A stale `false` reopens a 120 fps request as an ordinary
+            // 30 fps session — silently, since the rate is only visible by
+            // measuring it — and a stale `true` fails configuration outright on a
+            // module with no high-speed mode at this size.
+            highSpeed = preparedSize?.let { supportsHighSpeed(cameraId, it, fps) } == true
             openCameraId(cameraId)
         }
     }
@@ -973,6 +1006,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     fun closeCamera(resetSurface: Boolean = true) {
         isLanternEnabled = false
         zoomLevel = 1.0f
+        highSpeedActive = false
         cameraCaptureSession?.close()
         cameraCaptureSession = null
         cameraDevice?.close()
