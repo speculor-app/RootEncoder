@@ -461,10 +461,18 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         this.builderInputSurface = builder
         val cameraCaptureSession = this.cameraCaptureSession ?: return false
         try {
-            cameraCaptureSession.setRepeatingRequest(
-                builder.build(),
-                if (faceDetectionEnabled || frameCapturedCallback != null || customCaptureCompletedCallback != null) cb else null, null
-            )
+            val listener = if (faceDetectionEnabled || frameCapturedCallback != null || customCaptureCompletedCallback != null) cb else null
+            // A constrained high-speed session rejects a plain repeating request,
+            // so every tuning call — stabilisation, white balance, exposure —
+            // threw here and was silently lost the moment high speed engaged.
+            if (cameraCaptureSession is CameraConstrainedHighSpeedCaptureSession) {
+                cameraCaptureSession.setRepeatingBurst(
+                    cameraCaptureSession.createHighSpeedRequestList(builder.build()),
+                    listener, cameraHandler,
+                )
+            } else {
+                cameraCaptureSession.setRepeatingRequest(builder.build(), listener, null)
+            }
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Error", e)
