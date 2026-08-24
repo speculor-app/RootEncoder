@@ -1101,7 +1101,13 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
                 return cameraId
             }
         }
-        if (ids.isEmpty()) throw CameraOpenException("Camera no detected")
+        if (ids.isEmpty()) {
+            // An empty list is not proof the device has no camera — the service
+            // also answers with nothing while a module is being torn down. Handing
+            // back the id already in use lets the caller fail one prepare and retry,
+            // rather than an exception crossing whatever thread happened to ask.
+            return cameraId.ifEmpty { throw CameraOpenException("Camera no detected") }
+        }
         return ids[0]
     }
 
