@@ -1087,9 +1087,16 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     @JvmOverloads
     fun getCameraIdForFacing(facing: Facing, cameraManager: CameraManager = this.cameraManager): String {
         val selectedFacing = if (facing == Facing.BACK) CameraMetadata.LENS_FACING_BACK else CameraMetadata.LENS_FACING_FRONT
-        val ids = cameraManager.cameraIdList
+        val ids = runCatching { cameraManager.cameraIdList }.getOrDefault(emptyArray())
         for (cameraId in ids) {
-            val cameraFacing = cameraManager.getCameraCharacteristics(cameraId).get(CameraCharacteristics.LENS_FACING)
+            // A camera can be listed and still be unknown to the camera service.
+            // Tearing down a high-speed session unregisters the module for about a
+            // second on some hardware, and querying it in that window throws — on
+            // the main thread, where it killed the process rather than failing the
+            // prepare. Skipping the id lets the caller degrade instead.
+            val cameraFacing = runCatching {
+                cameraManager.getCameraCharacteristics(cameraId).get(CameraCharacteristics.LENS_FACING)
+            }.getOrNull()
             if (cameraFacing != null && cameraFacing == selectedFacing) {
                 return cameraId
             }
