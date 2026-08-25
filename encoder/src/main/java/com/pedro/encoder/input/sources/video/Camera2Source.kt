@@ -210,6 +210,15 @@ class Camera2Source(context: Context): VideoSource() {
 
   fun detachDirectVideoSurface() = camera.detachDirectVideoSurface()
 
+  /**
+   * Tuning applied to every session's first request at configure time — the
+   * only submission path every HAL accepts for a high-speed burst. See
+   * [Camera2ApiManager.initialRequestTuning].
+   */
+  fun setInitialRequestTuning(tuning: ((CaptureRequest.Builder) -> Unit)?) {
+    camera.initialRequestTuning = tuning
+  }
+
   fun openCameraId(id: String) {
     if (isRunning()) camera.reOpenCamera(id)
   }

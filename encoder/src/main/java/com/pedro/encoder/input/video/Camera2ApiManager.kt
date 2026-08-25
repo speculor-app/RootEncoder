@@ -281,11 +281,23 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
 
 
 
+    /**
+     * Tuning folded into every session's FIRST request, at configure time.
+     *
+     * Re-submitting a running high-speed burst to change controls is legal by
+     * the API and fatal on real hardware: an SDM660 HAL delivered 121 fps for
+     * five seconds and then took the camera device down on exactly such a
+     * resubmit. Controls that should hold for the whole session belong in the
+     * request the session is built with, where every HAL must accept them.
+     */
+    var initialRequestTuning: ((CaptureRequest.Builder) -> Unit)? = null
+
     @Throws(IllegalStateException::class, Exception::class)
     private fun drawSurface(cameraDevice: CameraDevice, surfaces: List<Surface>): CaptureRequest {
         val builderInputSurface = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         for (surface in surfaces) builderInputSurface.addTarget(surface)
         builderInputSurface.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        initialRequestTuning?.invoke(builderInputSurface)
         // A high-speed session accepts only a range it ADVERTISED, and the encoder is
         // fed a fixed rate, so the advertised fixed [fps, fps] pair is the one to ask
         // for — nearest-match would silently hand back 30. Constructed pairs the HAL
