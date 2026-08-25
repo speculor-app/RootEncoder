@@ -189,6 +189,27 @@ class Camera2Source(context: Context): VideoSource() {
   /** Whether the session now running is the constrained high-speed one. */
   fun isHighSpeedActive() = camera.highSpeedActive
 
+  /**
+   * Opt-in: when a constrained high-speed session is decided, feed the video
+   * encoder's input surface from the camera DIRECTLY instead of through the GL
+   * pipeline. GL keeps the preview; the encoder receives every frame. This is
+   * the only topology that reaches the advertised rate on HALs that classify a
+   * GL SurfaceTexture as preview and pace it (measured: capped at 60, or at the
+   * 30 fps interleave). The encoder must then be configured at SENSOR
+   * orientation — the camera cannot produce a portrait-swapped stream — so
+   * rotation is carried as muxer metadata, not pixels.
+   */
+  var directHighSpeedCapture = false
+
+  /** Is the running high-speed session feeding the encoder surface directly? */
+  fun isDirectVideoActive() = camera.isDirectVideoActive
+
+  /** @return true when attached; false leaves the GL topology in place. */
+  fun attachDirectVideoSurface(surface: android.view.Surface): Boolean =
+    directHighSpeedCapture && camera.attachDirectVideoSurface(surface)
+
+  fun detachDirectVideoSurface() = camera.detachDirectVideoSurface()
+
   fun openCameraId(id: String) {
     if (isRunning()) camera.reOpenCamera(id)
   }

@@ -38,6 +38,7 @@ import com.pedro.encoder.audio.GetAudioData
 import com.pedro.encoder.input.audio.GetMicrophoneData
 import com.pedro.encoder.input.sources.audio.AudioSource
 import com.pedro.encoder.input.sources.audio.NoAudioSource
+import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.input.sources.video.NoVideoSource
 import com.pedro.encoder.input.sources.video.VideoSource
 import com.pedro.encoder.utils.CodecUtil
@@ -517,11 +518,25 @@ abstract class StreamBase(
     videoEncoder.start(startTs)
     if (differentRecordResolution) videoEncoderRecord.start(startTs)
     audioEncoder.start(startTs)
-    glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
+    // A high-speed session with the direct topology enabled feeds the encoder
+    // surface from the CAMERA; handing it to GL as well would give the surface
+    // two producers. GL keeps rendering the preview either way. The dual-
+    // resolution record path stays GL-only — its second encoder cannot be a
+    // camera target of the same session. RECORDINGS only: the frames arrive
+    // sensor-oriented and an MP4 carries that as muxer metadata, but a live
+    // stream has no rotation field, so a streamed portrait capture would reach
+    // every receiver sideways — streams keep the GL path and its pixel rotation.
+    val direct = isRecording && !differentRecordResolution &&
+      (videoSource as? Camera2Source)?.attachDirectVideoSurface(videoEncoder.inputSurface) == true
+    if (!direct) glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
     if (differentRecordResolution) glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
   }
 
   private fun stopSources() {
+    // Only when the camera survives for the preview: its encoder is about to
+    // stop, so the session must return to the GL-only topology first. A camera
+    // that is stopping anyway drops the direct target with the session.
+    if (isOnPreview) (videoSource as? Camera2Source)?.detachDirectVideoSurface()
     if (!isOnPreview) videoSource.stop()
     audioSource.stop()
     glInterface.removeMediaCodecSurface()
@@ -558,6 +573,19 @@ abstract class StreamBase(
       val result = videoEncoderRecord.reset()
       if (!result) return false
       glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
+    }
+    // A direct-fed encoder's surface belongs to the camera session, and the
+    // reset replaces the surface: detach, reset, re-attach the NEW surface.
+    val cam = videoSource as? Camera2Source
+    if (cam?.isDirectVideoActive() == true) {
+      cam.detachDirectVideoSurface()
+      val result = videoEncoder.reset()
+      if (!result) return false
+      if (!cam.attachDirectVideoSurface(videoEncoder.inputSurface)) {
+        // The session type changed under the reset; GL is the fallback truth.
+        glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
+      }
+      return true
     }
     glInterface.removeMediaCodecSurface()
     val result = videoEncoder.reset()
