@@ -42,6 +42,15 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
   private var videoTrack: Int = -1
   private var audioTrack: Int = -1
 
+  /**
+   * Rotation metadata written into the MP4 (degrees clockwise, 0/90/180/270).
+   * For captures the camera feeds to the encoder DIRECTLY the pixels are
+   * sensor-oriented — no GL pass rotates them — so display orientation can only
+   * travel as metadata, the same way MediaRecorder stores it. Set before
+   * startRecord; 0 writes nothing.
+   */
+  var orientationHint = 0
+
   @Throws(IOException::class)
   override fun startRecordImp(
     path: String,
@@ -51,7 +60,9 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
     if (getAudioCodec() != AudioCodec.AAC) {
       throw IOException("Unsupported AudioCodec: " + getAudioCodec().name)
     }
-    mediaMuxer = MediaMuxer(path, outputFormat)
+    mediaMuxer = MediaMuxer(path, outputFormat).apply {
+      if (orientationHint != 0) setOrientationHint(orientationHint)
+    }
     if (tracks == RecordTracks.AUDIO && audioFormat != null) init()
   }
 
@@ -65,7 +76,9 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
     if (getAudioCodec() != AudioCodec.AAC) {
       throw IOException("Unsupported AudioCodec: " + getAudioCodec().name)
     }
-    mediaMuxer = MediaMuxer(fd, outputFormat)
+    mediaMuxer = MediaMuxer(fd, outputFormat).apply {
+      if (orientationHint != 0) setOrientationHint(orientationHint)
+    }
     if (tracks == RecordTracks.AUDIO && audioFormat != null) init()
   }
 

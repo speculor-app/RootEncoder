@@ -494,6 +494,16 @@ abstract class StreamBase(
   }
 
   /**
+   * Rotation metadata for the NEXT recording (degrees clockwise). Only for
+   * captures the camera feeds to the encoder directly, where no GL pass
+   * rotates the pixels; the GL path already encodes them upright. No-op on
+   * record controllers that are not MediaMuxer-backed.
+   */
+  fun setRecordOrientationHint(degrees: Int) {
+    (recordController as? AndroidMuxerRecordController)?.orientationHint = degrees
+  }
+
+  /**
    * return surface texture that can be used to render and encode custom data. Return null if video not prepared.
    * start and stop rendering must be managed by the user.
    */
