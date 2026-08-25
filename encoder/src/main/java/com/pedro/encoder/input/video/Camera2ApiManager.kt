@@ -162,16 +162,19 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     val isDirectVideoActive: Boolean get() = highSpeedActive && directVideoSurface != null
 
     /**
-     * Add the encoder's input surface as the high-speed session's video target,
-     * rebuilding the session over the open device. False when no high-speed
-     * session is decided or no camera is open — the caller then keeps the GL
-     * path, which is the correct topology for every ordinary session.
+     * Add the encoder's input surface as the high-speed session's video target.
+     * False when no high-speed session is decided — the caller then keeps the
+     * GL path, which is the correct topology for every ordinary session.
+     *
+     * Legal before the camera opens: the open is asynchronous, and a source
+     * swapped in mid-stream is asked to carry the surface while its device is
+     * still on the way — the session build picks the stored target up. An
+     * already-open device rebuilds its session immediately.
      */
     fun attachDirectVideoSurface(surface: Surface): Boolean {
         if (!highSpeed) return false
-        val device = cameraDevice ?: return false
         directVideoSurface = surface
-        startPreview(device)
+        cameraDevice?.let { startPreview(it) }
         return true
     }
 

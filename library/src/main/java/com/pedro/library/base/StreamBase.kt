@@ -504,6 +504,28 @@ abstract class StreamBase(
   }
 
   /**
+   * Re-feed the running encoder after the video source changed under it.
+   *
+   * A direct-fed session's producer is the CAMERA, and swapping sources — the
+   * demand loop releasing and re-attaching, a lens change reopening on another
+   * module — kills that producer with the old session: the fresh camera feeds
+   * only GL's preview texture, GL deliberately does not feed the encoder in
+   * direct mode, and every RTSP puller then starves on a stream whose DESCRIBE
+   * still answers. Re-attaches the direct target when the new source runs a
+   * high-speed session, and hands the encoder back to GL when it does not.
+   */
+  fun refeedVideoEncoder() {
+    if (!videoEncoder.isRunning) return
+    val cam = videoSource as? Camera2Source
+    if (cam?.attachDirectVideoSurface(videoEncoder.inputSurface) == true) {
+      glInterface.removeMediaCodecSurface()
+    } else {
+      glInterface.removeMediaCodecSurface()
+      glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
+    }
+  }
+
+  /**
    * return surface texture that can be used to render and encode custom data. Return null if video not prepared.
    * start and stop rendering must be managed by the user.
    */
