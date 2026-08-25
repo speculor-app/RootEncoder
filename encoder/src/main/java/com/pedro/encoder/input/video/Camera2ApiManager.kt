@@ -234,40 +234,48 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         val builderInputSurface = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         for (surface in surfaces) builderInputSurface.addTarget(surface)
         builderInputSurface.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-        // A high-speed session accepts only a range it advertised, and the encoder is
-        // fed a fixed rate, so the exact [fps, fps] pair is the one to ask for —
-        // nearest-match would silently hand back 30.
-        if (highSpeed) builderInputSurface.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
+        // A high-speed session accepts only a range it ADVERTISED, and the encoder is
+        // fed a fixed rate, so the advertised fixed [fps, fps] pair is the one to ask
+        // for — nearest-match would silently hand back 30. Constructed pairs the HAL
+        // never advertised are refused by createHighSpeedRequestList on strict HALs,
+        // so the range is looked up from the module's own list, falling back to the
+        // advertised [min, fps] variable range before ever constructing one blind.
+        if (highSpeed) {
+            val advertised = preparedSize?.let { getHighSpeedFps(cameraId, it) }.orEmpty()
+            val range = advertised.firstOrNull { it.lower == fps && it.upper == fps }
+                ?: advertised.filter { it.upper == fps }.maxByOrNull { it.lower }
+                ?: Range(fps, fps)
+            builderInputSurface.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+        }
         else if (dynamicFps) adaptFpsRangeDynamic(fps, builderInputSurface) else adaptFpsRange(fps, builderInputSurface)
         this.builderInputSurface = builderInputSurface
         return builderInputSurface.build()
     }
 
     private fun adaptFpsRange(expectedFps: Int, builderInputSurface: CaptureRequest.Builder) {
-        val fpsRanges = getSupportedFps(null, facing)
-        if (fpsRanges.isNotEmpty()) {
-            var closestRange = fpsRanges[0]
-            var measure = (abs((closestRange.lower - expectedFps).toDouble()) + abs(
-                (closestRange.upper - expectedFps).toDouble()
-            )).toInt()
-            for (range in fpsRanges) {
-                if (CameraHelper.discardCamera2Fps(range, facing)) continue
-                if (range.lower <= expectedFps && range.upper >= expectedFps) {
-                    val curMeasure = abs((((range.lower + range.upper) / 2) - expectedFps).toDouble()).toInt()
-                    if (curMeasure < measure) {
-                        closestRange = range
-                        measure = curMeasure
-                    } else if (curMeasure == measure) {
-                        if (abs((range.upper - expectedFps).toDouble()) < abs((closestRange.upper - expectedFps).toDouble())) {
-                            closestRange = range
-                            measure = curMeasure
-                        }
-                    }
-                }
+        // The OPEN module's ranges, not the first camera of this facing: the tele
+        // and ultra-wide are different modules from the wide and do not carry the
+        // same AE ranges, so consulting the facing picked another camera's rates.
+        val fpsRanges = getSupportedFps(null, cameraId)
+            .filterNot { CameraHelper.discardCamera2Fps(it, facing) }
+        if (fpsRanges.isEmpty()) return
+        // A range containing the ask, preferring the one centred closest to it —
+        // a fixed [30,30] beats a sagging [7,30] for an asked 30.
+        val containing = fpsRanges
+            .filter { it.lower <= expectedFps && it.upper >= expectedFps }
+            .minByOrNull { range ->
+                abs((range.lower + range.upper) / 2 - expectedFps) * 1000 +
+                    abs(range.upper - expectedFps)
             }
-            Log.i(TAG, "fps: " + closestRange.lower + " - " + closestRange.upper)
-            builderInputSurface.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, closestRange)
-        }
+        // Nothing contains the ask (240 asked, ranges topping at 60, or a
+        // high-speed session that fell back to ordinary): the honest substitute
+        // is the FASTEST range below it. The old fallback kept whatever the HAL
+        // happened to list first, which on real phones is a 15 fps range.
+        val closestRange = containing
+            ?: fpsRanges.filter { it.upper <= expectedFps }.maxByOrNull { it.upper * 1000 + it.lower }
+            ?: fpsRanges.minByOrNull { it.lower }!!
+        Log.i(TAG, "fps: " + closestRange.lower + " - " + closestRange.upper)
+        builderInputSurface.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, closestRange)
     }
 
     private fun adaptFpsRangeDynamic(fps: Int, builderInputSurface: CaptureRequest.Builder) {
@@ -345,9 +353,22 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     private fun supportsHighSpeed(cameraId: String, size: Size, fps: Int): Boolean =
         getHighSpeedFps(cameraId, size).any { it.upper == fps }
 
-    fun getSupportedFps(size: Size?, facing: Facing): List<Range<Int>> {
+    fun getSupportedFps(size: Size?, facing: Facing): List<Range<Int>> =
         try {
-            val characteristics = cameraManager.getCameraCharacteristics(getCameraIdForFacing(facing))
+            getSupportedFps(size, getCameraIdForFacing(facing))
+        } catch (e: Exception) {
+            Log.e(TAG, "Error", e)
+            emptyList()
+        }
+
+    /**
+     * AE target ranges of ONE module. The facing variant above consults the
+     * FIRST camera of that facing, which is a different module from an open
+     * tele or ultra-wide — callers that know which camera is open ask by id.
+     */
+    fun getSupportedFps(size: Size?, cameraId: String): List<Range<Int>> {
+        try {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val fpsSupported = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return emptyList()
             return if (size != null) {
                 val streamConfigurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
