@@ -532,11 +532,11 @@ abstract class StreamBase(
     // surface from the CAMERA; handing it to GL as well would give the surface
     // two producers. GL keeps rendering the preview either way. The dual-
     // resolution record path stays GL-only — its second encoder cannot be a
-    // camera target of the same session. RECORDINGS only: the frames arrive
-    // sensor-oriented and an MP4 carries that as muxer metadata, but a live
-    // stream has no rotation field, so a streamed portrait capture would reach
-    // every receiver sideways — streams keep the GL path and its pixel rotation.
-    val direct = isRecording && !differentRecordResolution &&
+    // camera target of the same session. Streams and recordings both: the
+    // frames arrive sensor-oriented, and the caller that opted in owns saying
+    // so — the muxer's orientation hint for files, the SDP's rotation
+    // attribute for streams.
+    val direct = !differentRecordResolution &&
       (videoSource as? Camera2Source)?.attachDirectVideoSurface(videoEncoder.inputSurface) == true
     if (!direct) glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
     if (differentRecordResolution) glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
