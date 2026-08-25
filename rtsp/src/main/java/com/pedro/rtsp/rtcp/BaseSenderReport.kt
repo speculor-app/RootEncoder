@@ -100,9 +100,17 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
      */
     private const val NTP_EPOCH_OFFSET_SECONDS = 2_208_988_800L
 
-    /** The historical behaviour, and the marker for "no caller has supplied a clock". */
+    /**
+     * The default, and the marker for "no caller has supplied a clock".
+     *
+     * Epoch wall clock, not [TimeUtils.getCurrentTimeNano]: that reads
+     * SystemClock.elapsedRealtimeNanos — nanoseconds since BOOT — and stamping it into
+     * an epoch field advertised the stream's capture time as 1970-plus-uptime. A
+     * receiver honouring the field measured such a stream fifty-six years out and
+     * rejected it; one that did not would have silently mis-fused it.
+     */
     @JvmStatic
-    val deviceClockProvider: (Long) -> Long = { TimeUtils.getCurrentTimeNano() }
+    val deviceClockProvider: (Long) -> Long = { TimeUtils.getCurrentTimeMillis() * 1_000_000L }
 
 
     /**
@@ -125,9 +133,14 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
      * both problems at once.
      *
      * Return 0 to say "no trustworthy time yet" — while a time source is still settling,
-     * for instance. Reports then fall back to the device clock and no capture-time SEI is
-     * emitted, so a receiver treats the stream as undisciplined rather than acting on a
-     * confident wrong answer.
+     * or after it has lost its master and started drifting. NO Sender Report is emitted
+     * for that interval (and no capture-time SEI), so a receiver anchors the stream on
+     * its own arrival clock: late, but never wrong. A receiver cannot distinguish an
+     * undisciplined absolute time from a disciplined one, so sending any fallback here
+     * hands it a confident wrong answer — the previous fallback stamped a boot-relative
+     * reading into the epoch field, which advertised the stream as captured in 1970.
+     * Reporting resumes automatically at the first interval the provider returns a
+     * time again.
      *
      * Applied to the video track only: audio is packetised on a different capture
      * timeline, so the same conversion would not be valid for it.
@@ -226,11 +239,16 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     videoBuffer.setLong(videoOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - videoTime >= interval) {
       videoTime = TimeUtils.getCurrentTimeMillis()
-      // 0 from the provider means it has no trustworthy time yet; the device clock is
-      // then no worse than the historical behaviour and better than a wrong absolute.
+      // 0 from the provider means it has no trustworthy time yet — send NOTHING rather
+      // than something wrong. The old fallback stamped a boot-relative reading into the
+      // epoch field, so an undisciplined phone advertised its capture epoch as
+      // 1970-plus-uptime and a receiver's sanity gate measured it 56 years out. With no
+      // report the receiver anchors on arrival (late, never wrong); the counters keep
+      // accumulating and the next interval retries, so reporting resumes by itself the
+      // moment the clock disciplines.
       val supplied = ntpClockProvider(captureTimeOf(rtpFrame.timeStamp))
-      val ntp = if (supplied > 0L) supplied else TimeUtils.getCurrentTimeNano()
-      setData(videoBuffer, ntp, rtpFrame.timeStamp)
+      if (supplied <= 0L) return false
+      setData(videoBuffer, supplied, rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(videoBuffer, srtcpVideoIndex++, ssrcVideo, it), rtpFrame)
       } ?: sendReport(videoBuffer, rtpFrame)
@@ -247,9 +265,10 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     audioBuffer.setLong(audioOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - audioTime >= interval) {
       audioTime = TimeUtils.getCurrentTimeMillis()
-      // Device clock, not ntpClockProvider: audio presentation times are on the capture
-      // timeline of AudioRecord, which the provider's conversion does not describe.
-      setData(audioBuffer, TimeUtils.getCurrentTimeNano(), rtpFrame.timeStamp)
+      // Device wall clock, not ntpClockProvider: audio presentation times are on the
+      // capture timeline of AudioRecord, which the provider's conversion does not
+      // describe. Epoch clock, not getCurrentTimeNano — see deviceClockProvider.
+      setData(audioBuffer, TimeUtils.getCurrentTimeMillis() * 1_000_000L, rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(audioBuffer, srtcpAudioIndex++, ssrcAudio, it), rtpFrame)
       } ?: sendReport(audioBuffer, rtpFrame)
