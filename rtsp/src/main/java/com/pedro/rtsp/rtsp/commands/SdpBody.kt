@@ -30,6 +30,15 @@ object SdpBody {
   private fun frameRateAttr(fps: Int): String =
     if (fps > 0) "a=framerate:$fps\r\n" else ""
 
+  // Display rotation of the coded frames, degrees clockwise. SDP has no
+  // standard field for a static video rotation, so this is a private attribute
+  // (RFC 4566 says receivers must ignore attributes they do not know) — the
+  // sender that encodes SENSOR-oriented frames is the only party that knows how
+  // to stand them up, and saying nothing forced every receiver to guess.
+  // Omitted at 0: an upright stream declares nothing.
+  private fun rotationAttr(rotation: Int): String =
+    if (rotation != 0) "a=x-video-rotation:$rotation\r\n" else ""
+
 
   /**
    * Opus only support sample rate 48khz and stereo channel but Android encoder accept others values.
@@ -90,7 +99,7 @@ object SdpBody {
   }
 
   /** @param fps frames per second to DECLARE, or 0 to say nothing. See [createH265Body]. */
-  fun createH264Body(trackVideo: Int, sps: String, pps: String, secured: Boolean = false, fps: Int = 0): String {
+  fun createH264Body(trackVideo: Int, sps: String, pps: String, secured: Boolean = false, fps: Int = 0, rotation: Int = 0): String {
     val payload = RtpConstants.payloadType + trackVideo
     val type = if (secured) "UDP/TLS/RTP/SAVPF" else "RTP/AVP"
     val identifier = if (secured) {
@@ -101,6 +110,7 @@ object SdpBody {
         "a=rtpmap:$payload H264/${RtpConstants.clockVideoFrequency}\r\n" +
         "a=fmtp:$payload packetization-mode=1; sprop-parameter-sets=$sps,$pps\r\n" +
         frameRateAttr(fps) +
+        rotationAttr(rotation) +
         identifier
   }
 
@@ -112,7 +122,7 @@ object SdpBody {
    * stream had FFmpeg report 29.83, 29.92 and 90000 fps, the last being the RTP
    * clock, i.e. giving up. The sender knows the answer, so it should say it.
    */
-  fun createH265Body(trackVideo: Int, sps: String, pps: String, vps: String, secured: Boolean = false, fps: Int = 0): String {
+  fun createH265Body(trackVideo: Int, sps: String, pps: String, vps: String, secured: Boolean = false, fps: Int = 0, rotation: Int = 0): String {
     val payload = RtpConstants.payloadType + trackVideo
     val type = if (secured) "UDP/TLS/RTP/SAVPF" else "RTP/AVP"
     val identifier = if (secured) {
@@ -123,6 +133,7 @@ object SdpBody {
         "a=rtpmap:$payload H265/${RtpConstants.clockVideoFrequency}\r\n" +
         "a=fmtp:$payload packetization-mode=1; sprop-sps=$sps; sprop-pps=$pps; sprop-vps=$vps\r\n" +
         frameRateAttr(fps) +
+        rotationAttr(rotation) +
         identifier
   }
 }
