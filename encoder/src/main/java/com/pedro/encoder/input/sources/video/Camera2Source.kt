@@ -359,6 +359,13 @@ class Camera2Source(context: Context): VideoSource() {
    *   builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
    * }
    */
+  /** One autofocus scan, submitted the way the session type requires. */
+  fun triggerAutoFocus(regions: Array<android.hardware.camera2.params.MeteringRectangle>? = null): Boolean =
+    camera.triggerAutoFocus(regions)
+
+  /** Release a held autofocus — see Camera2ApiManager.cancelAutoFocus. */
+  fun cancelAutoFocus(): Boolean = camera.cancelAutoFocus()
+
   fun setCustomRequest(request: (CaptureRequest.Builder) -> Unit): Boolean {
     return camera.setCustomRequest(request)
   }

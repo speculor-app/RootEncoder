@@ -569,6 +569,60 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     }
 
     /**
+     * Fire ONE autofocus scan, leaving the repeating request untriggered.
+     *
+     * A trigger is an edge and belongs in a single capture. Put it in the REPEATING
+     * request and the camera is told to restart the scan on every frame; a
+     * constrained high-speed session then multiplies that by the batch size, because
+     * createHighSpeedRequestList copies the request into every frame of the batch —
+     * eight of them at 240 fps. The scan restarts forever, the lens hunts and returns
+     * to where it began, and on screen that is a flicker and no focus change.
+     *
+     * A high-speed session accepts a single submission only through captureBurst
+     * (setRepeatingBurst being the other), so that is the path taken there.
+     *
+     * @param regions optional AF metering regions to aim the scan at, applied to the
+     *   repeating request as well so the choice survives the scan.
+     * @return false when there is no session, or the camera refused the submission.
+     */
+    /**
+     * Release a held autofocus, as a single capture.
+     *
+     * The same rule as the trigger: a CANCEL left in the repeating request does not
+     * clear a lock on every HAL, and until it clears, the next trigger is ignored —
+     * measured as a first tap that focuses and every tap after it doing nothing.
+     */
+    fun cancelAutoFocus(): Boolean = submitAfTrigger(CameraMetadata.CONTROL_AF_TRIGGER_CANCEL, null)
+
+    fun triggerAutoFocus(regions: Array<MeteringRectangle>? = null): Boolean =
+        submitAfTrigger(CameraMetadata.CONTROL_AF_TRIGGER_START, regions)
+
+    private fun submitAfTrigger(trigger: Int, regions: Array<MeteringRectangle>?): Boolean {
+        val builder = builderInputSurface ?: return false
+        val session = cameraCaptureSession ?: return false
+        val listener = if (faceDetectionEnabled || frameCapturedCallback != null || customCaptureCompletedCallback != null) cb else null
+        return try {
+            regions?.let { builder.set(CaptureRequest.CONTROL_AF_REGIONS, it) }
+            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, trigger)
+            val one = builder.build()
+            if (session is CameraConstrainedHighSpeedCaptureSession) {
+                session.captureBurst(session.createHighSpeedRequestList(one), listener, cameraHandler)
+            } else {
+                session.capture(one, listener, cameraHandler)
+            }
+
+            // And the repeating request goes back to idle, carrying the regions but
+            // no trigger, so the scan runs once and its result stands.
+            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
+            applyRequest(builder)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "AF trigger $trigger failed", e)
+            false
+        }
+    }
+
+    /**
      * @param mode value from CameraCharacteristics.CONTROL_AWB_MODE_*
      */
     fun enableAutoWhiteBalance(mode: Int): Boolean {
