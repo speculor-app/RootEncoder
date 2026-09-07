@@ -96,6 +96,13 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   // continuous, and the cost it stops paying is GPU time on every captured frame.
   // 0 disables the cap.
   private var lastPreviewNs = 0L
+  // The gate measures from the last DRAWN frame, so it needs slack: a source at
+  // exactly the cap rate jitters around the interval, and without it every frame
+  // that lands a hair early is skipped and its successor lands a whole period
+  // late — a camera delivering 30 fps presented at 19, measured on a Magic5 Pro
+  // armed viewfinder. The slack must stay under any real source's frame interval
+  // (240 fps → 4.17 ms) or two consecutive frames could both pass the gate.
+  private val previewGateSlackNs = 4_000_000L
   var previewFpsCap = 30
     set(value) { field = value; lastPreviewNs = 0L }
   private val forceRender = ForceRenderer()
@@ -340,7 +347,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       // Gated here and nowhere else: the offscreen swap above must keep running
       // every frame or the whole pipeline loses its pacing.
       val interval = if (previewFpsCap > 0) 1_000_000_000L / previewFpsCap else 0L
-      if (timestamp - lastPreviewNs >= interval) {
+      if (timestamp - lastPreviewNs >= interval - previewGateSlackNs) {
         lastPreviewNs = timestamp
         if (surfaceManagerPreview.makeCurrent()) {
           mainRender.drawScreenPreview(w, h, orientationPreview, aspectRatioMode, previewOrientation,
