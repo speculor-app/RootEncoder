@@ -201,12 +201,24 @@ class Camera2Source(context: Context): VideoSource() {
    */
   var directHighSpeedCapture = false
 
-  /** Is the running high-speed session feeding the encoder surface directly? */
+  /**
+   * Opt-in: feed the encoder from the camera directly in EVERY session,
+   * ordinary ones included. The GL pass is not free: it redraws each frame the
+   * camera delivered into the encoder's surface, and a GPU that cannot do that
+   * at the camera's pace drops frames the camera did not (measured on an
+   * SDM660 at 4K30: 29.9 fps into the texture, 19–22 out of the encoder, for
+   * either codec). Same obligation as [directHighSpeedCapture]: the encoder
+   * is configured at sensor orientation and rotation rides as metadata.
+   */
+  var directCapture = false
+
+  /** Is the running session feeding the encoder surface directly? */
   fun isDirectVideoActive() = camera.isDirectVideoActive
 
   /** @return true when attached; false leaves the GL topology in place. */
   fun attachDirectVideoSurface(surface: android.view.Surface): Boolean =
-    directHighSpeedCapture && camera.attachDirectVideoSurface(surface)
+    (directHighSpeedCapture || directCapture) &&
+      camera.attachDirectVideoSurface(surface, ordinary = directCapture)
 
   fun detachDirectVideoSurface() = camera.detachDirectVideoSurface()
 

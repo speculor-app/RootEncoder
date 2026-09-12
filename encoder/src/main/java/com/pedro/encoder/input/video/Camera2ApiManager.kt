@@ -158,21 +158,36 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
      */
     private var directVideoSurface: Surface? = null
 
-    /** Is the running high-speed session feeding the encoder surface directly? */
-    val isDirectVideoActive: Boolean get() = highSpeedActive && directVideoSurface != null
+    /**
+     * Is the session that got configured feeding the encoder surface directly?
+     * Set from the surface list the session was BUILT with, not from intent: an
+     * attached target only counts once a session carrying it is configured.
+     */
+    @Volatile
+    var isDirectVideoActive: Boolean = false
+        private set
 
     /**
-     * Add the encoder's input surface as the high-speed session's video target.
-     * False when no high-speed session is decided — the caller then keeps the
-     * GL path, which is the correct topology for every ordinary session.
+     * Add the encoder's input surface as the session's video target.
+     *
+     * A high-speed session always takes it. An ORDINARY session takes it only
+     * when [ordinary] says so, because the caller then owns the consequence:
+     * the encoder is fed at sensor orientation and the rotation has to travel
+     * as metadata. The same measured reason applies at every rate — a GL
+     * SurfaceTexture is a preview-class consumer, and on a phone whose GPU
+     * cannot redraw the capture at the camera's pace the GL pass drops frames
+     * the camera delivered (a 4K30 take on an SDM660 measured 29.9 fps into
+     * the texture and 19–22 out of the encoder). False leaves the GL path,
+     * the correct topology when nothing opted in.
      *
      * Legal before the camera opens: the open is asynchronous, and a source
      * swapped in mid-stream is asked to carry the surface while its device is
      * still on the way — the session build picks the stored target up. An
      * already-open device rebuilds its session immediately.
      */
-    fun attachDirectVideoSurface(surface: Surface): Boolean {
-        if (!highSpeed) return false
+    @JvmOverloads
+    fun attachDirectVideoSurface(surface: Surface, ordinary: Boolean = false): Boolean {
+        if (!highSpeed && !ordinary) return false
         directVideoSurface = surface
         cameraDevice?.let { startPreview(it) }
         return true
@@ -234,15 +249,15 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
             // so the frame-capture surface is dropped rather than failing the whole
             // configuration.
             if (!highSpeed) imageReader?.let { listSurfaces.add(it.surface) }
-            // The direct video target rides only in a high-speed session, and only
-            // while its encoder still owns it: a reopen after the encoder stopped
-            // would otherwise offer the HAL a released surface, which fails the
-            // whole configuration instead of just losing the fast path.
-            if (highSpeed) {
-                val direct = directVideoSurface
-                if (direct != null && !direct.isValid) directVideoSurface = null
-                directVideoSurface?.let { listSurfaces.add(it) }
-            }
+            // The direct video target rides only while its encoder still owns
+            // it: a reopen after the encoder stopped would otherwise offer the
+            // HAL a released surface, which fails the whole configuration
+            // instead of just losing the fast path. Whether it is here at all
+            // was decided by attachDirectVideoSurface.
+            val direct = directVideoSurface
+            if (direct != null && !direct.isValid) directVideoSurface = null
+            directVideoSurface?.let { listSurfaces.add(it) }
+            val directInSession = directVideoSurface != null
             val captureRequest = drawSurface(cameraDevice, listSurfaces)
             createCaptureSession(
                 cameraDevice,
@@ -252,6 +267,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
                     try {
                         val listener = if (faceDetectionEnabled || frameCapturedCallback != null || customCaptureCompletedCallback != null) cb else null
                         highSpeedActive = highSpeed && it is CameraConstrainedHighSpeedCaptureSession
+                        isDirectVideoActive = directInSession
                         if (highSpeed && it is CameraConstrainedHighSpeedCaptureSession) {
                             // High-speed capture is delivered as a batch: the session
                             // expands one request into the list it will actually run,
@@ -1157,6 +1173,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         isLanternEnabled = false
         zoomLevel = 1.0f
         highSpeedActive = false
+        isDirectVideoActive = false
         // The direct target belongs to a session that no longer exists. A
         // reopen re-attaches it through startPreview only if its encoder is
         // still alive (isValid), so clearing it here would break recovery —
