@@ -67,6 +67,15 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int rotation = 90;
   private int iFrameInterval = 2;
   private long firstTimestamp = 0;
+
+  /**
+   * The source timestamp (surface mode: the camera's sensor time, µs) of the
+   * first encoded frame — the value every output PTS is relative to. 0 until a
+   * frame has been encoded. A caller anchoring a recording on a PTS adds it back.
+   */
+  public long getFirstTimestampUs() {
+    return firstTimestamp;
+  }
   //for disable video
   private final FpsLimiter fpsLimiter = new FpsLimiter();
   private FormatVideoEncoder formatVideoEncoder = FormatVideoEncoder.YUV420Dynamical;

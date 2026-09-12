@@ -51,6 +51,40 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
    */
   var orientationHint = 0
 
+  /**
+   * Whether the FIRST video frame may open the file. Consulted per frame while
+   * the file is empty; null admits the first keyframe, as before. A gate that
+   * returns false holds the file — nothing is written, nothing requested — and
+   * when it opens the next frame re-arms a keyframe request, so the file
+   * begins on a fresh keyframe a frame or two later rather than up to a GOP
+   * later. Built for a settle gate: the first second of a take arrived at the
+   * wrong cadence on every phone measured, and it went straight into the file.
+   */
+  @Volatile var admitFirstFrame: (() -> Boolean)? = null
+
+  /**
+   * The ENCODER'S timestamp of the first video frame WRITTEN, µs — the camera's
+   * clock, not the file's — so a caller can anchor the take on it; -1 until one
+   * is. With a pre-roll this is EARLIER than the tap.
+   */
+  @Volatile var firstWrittenPtsUs = -1L
+    private set
+
+  private var gateRequester: RecordController.RequestKeyFrame? = null
+  private var heldByGate = false
+
+  /** Per-take counters a caller can read back: what the muxer did with the frames it was handed. */
+  @Volatile var framesHeldByGate = 0L; private set
+  @Volatile var framesBeforeFormat = 0L; private set
+  @Volatile var framesWaitingKey = 0L; private set
+  @Volatile var framesWritten = 0L; private set
+  @Volatile var lastWriteError: String? = null; private set
+
+  override fun setRequestKeyFrame(requestKeyFrame: RecordController.RequestKeyFrame?) {
+    gateRequester = requestKeyFrame
+    super.setRequestKeyFrame(requestKeyFrame)
+  }
+
   @Throws(IOException::class)
   override fun startRecordImp(
     path: String,
@@ -63,6 +97,9 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
     mediaMuxer = MediaMuxer(path, outputFormat).apply {
       if (orientationHint != 0) setOrientationHint(orientationHint)
     }
+    firstWrittenPtsUs = -1L
+    heldByGate = false
+    framesHeldByGate = 0; framesBeforeFormat = 0; framesWaitingKey = 0; framesWritten = 0; lastWriteError = null
     if (tracks == RecordTracks.AUDIO && audioFormat != null) init()
   }
 
@@ -119,8 +156,11 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
     if (track == -1) return
     try {
       mediaMuxer?.writeSampleData(track, frame.data, frame.info.toMediaCodecBufferInfo())
+      if (frame.type == MediaFrame.Type.VIDEO && firstWrittenPtsUs < 0) firstWrittenPtsUs = rawTimestampUs(frame.info.timestamp)
+      if (frame.type == MediaFrame.Type.VIDEO) framesWritten++
       bitrateManager?.calculateBitrate(frame.info.size * 8L)
     } catch (e: Exception) {
+      lastWriteError = e.toString()
       listener?.onError(e)
     }
   }
@@ -128,7 +168,18 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
   override suspend fun onWriteFrame(frame: MediaFrame) {
     when (frame.type) {
       MediaFrame.Type.VIDEO -> {
+        if (recordStatus == RecordController.Status.STARTED && (videoFormat == null || (audioFormat == null && tracks != RecordTracks.VIDEO))) framesBeforeFormat++
         if (recordStatus == RecordController.Status.STARTED && videoFormat != null && (audioFormat != null || tracks == RecordTracks.VIDEO)) {
+          // A flushed pre-roll comes from a warm encoder already on cadence: nothing to settle.
+          if (preRollFlushedFrames == 0 && admitFirstFrame?.invoke() == false) {
+            heldByGate = true
+            framesHeldByGate++
+            return
+          }
+          if (heldByGate) {
+            heldByGate = false
+            myRequestKeyFrame = gateRequester
+          }
           if (frame.info.isKeyFrame || isKeyFrame(frame.data)) {
             myRequestKeyFrame = null
             videoTrack = mediaMuxer?.addTrack(videoFormat!!) ?: -1
@@ -136,7 +187,8 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
           } else if (myRequestKeyFrame != null) {
             myRequestKeyFrame?.onRequestKeyFrame()
             myRequestKeyFrame = null
-          }
+            framesWaitingKey++
+          } else framesWaitingKey++
         } else if (recordStatus == RecordController.Status.RESUMED && (frame.info.isKeyFrame
               || isKeyFrame(frame.data))
         ) {

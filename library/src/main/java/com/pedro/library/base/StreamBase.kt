@@ -45,6 +45,7 @@ import com.pedro.encoder.utils.CodecUtil
 import com.pedro.encoder.video.FormatVideoEncoder
 import com.pedro.encoder.video.GetVideoData
 import com.pedro.encoder.video.VideoEncoder
+import com.pedro.library.base.recording.AsyncBaseRecordController
 import com.pedro.library.base.recording.RecordController
 import com.pedro.library.util.AndroidMuxerRecordController
 import com.pedro.library.util.FpsListener
@@ -85,6 +86,83 @@ abstract class StreamBase(
   //video/audio record
   private var recordController: RecordController = AndroidMuxerRecordController()
   private val fpsListener = FpsListener()
+
+  /**
+   * Every encoded video frame's presentation time and keyframe flag, on the
+   * encoder's thread, before the frame reaches the recorder or the stream.
+   * For a caller measuring the cadence LIVE — a settle gate at record start
+   * needs the intervals as they happen, not a per-second count.
+   */
+  @Volatile var frameListener: ((ptsUs: Long, keyFrame: Boolean) -> Unit)? = null
+
+  /**
+   * Sources and encoders running with no client. A recording started on a
+   * warm pipeline begins on the next keyframe with no session rebuild and no
+   * cold encoder: the camera has been feeding the encoder all along. Costs
+   * the encode while armed, which is why it is a choice and not the default.
+   */
+  var isWarm = false
+    private set
+
+  fun warmUp(): Boolean {
+    if (isStreaming || isRecording || isWarm) return isWarm
+    startSources()
+    isWarm = true
+    return true
+  }
+
+  /**
+   * The MP4 muxer's first-frame gate — see AndroidMuxerRecordController.admitFirstFrame.
+   * Ignored (and null) when the record controller is not the MP4 muxer.
+   */
+  var admitFirstRecordFrame: (() -> Boolean)?
+    get() = (recordController as? AndroidMuxerRecordController)?.admitFirstFrame
+    set(value) { (recordController as? AndroidMuxerRecordController)?.admitFirstFrame = value }
+
+  /** Presentation time of the first video frame the MP4 muxer wrote, µs; -1 until one is. */
+  /**
+   * The CAMERA'S timestamp (µs, the source's clock) of the first video frame the
+   * current recording wrote; -1 until one is. The encoder's PTS are relative to
+   * its first frame, so the base is added back here.
+   */
+  val firstRecordedPtsUs: Long
+    get() {
+      val w = (recordController as? AndroidMuxerRecordController)?.firstWrittenPtsUs ?: -1L
+      return if (w < 0) w else w + videoEncoder.firstTimestampUs
+    }
+
+  /**
+   * Microseconds of encoded frames the record controller keeps while no file is
+   * open, written ahead of the live frames on the next startRecord. Only a
+   * WARM pipeline ([warmUp]) produces frames with no file open, so this is the
+   * warm state's reason to exist: the take starts before the tap.
+   */
+  var recordPreRollUs: Long
+    get() = (recordController as? AsyncBaseRecordController)?.preRollUs ?: 0L
+    set(value) { (recordController as? AsyncBaseRecordController)?.preRollUs = value }
+
+  /** Video frames the last startRecord wrote from the pre-roll ring, and the span they covered (µs). */
+  val preRollFlushedFrames: Int get() = (recordController as? AsyncBaseRecordController)?.preRollFlushedFrames ?: 0
+  val preRollFlushedUs: Long get() = (recordController as? AsyncBaseRecordController)?.preRollFlushedUs ?: 0L
+
+  /** The source timestamp (µs) the video encoder's PTS are relative to; 0 until it has encoded a frame. */
+  val videoTimestampBaseUs: Long get() = videoEncoder.firstTimestampUs
+
+  /** One line of what the muxer did with this take's frames so far — for a caller's log. */
+  fun recordDiagnostics(): String {
+    val m = recordController as? AndroidMuxerRecordController ?: return "muxer=${recordController.javaClass.simpleName}"
+    return "status=${recordController.getStatus()} written=${m.framesWritten} held=${m.framesHeldByGate} beforeFormat=${m.framesBeforeFormat} waitingKey=${m.framesWaitingKey} " +
+      "preRoll=${preRollFlushedFrames}f/${preRollFlushedUs / 1000}ms firstPts=${m.firstWrittenPtsUs} err=${m.lastWriteError} videoEnc=${videoEncoder.isRunning} audioEnc=${audioEncoder.isRunning} warm=$isWarm"
+  }
+
+  /** Back to a prepared, idle pipeline. No-op under a live stream or recording. */
+  fun coolDown(): Boolean {
+    if (!isWarm) return true
+    isWarm = false
+    if (isStreaming || isRecording) return true
+    stopSources()
+    return prepareEncoders()
+  }
   var isStreaming = false
     private set
   var isOnPreview = false
@@ -187,7 +265,7 @@ abstract class StreamBase(
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
     startStreamImp(endPoint)
-    if (!isRecording) startSources()
+    if (!isRecording && !isWarm) startSources()
     else requestKeyframe()
   }
 
@@ -247,7 +325,7 @@ abstract class StreamBase(
   fun stopStream(): Boolean {
     isStreaming = false
     stopStreamImp()
-    if (!isRecording) {
+    if (!isRecording && !isWarm) {
       stopSources()
       return prepareEncoders()
     }
@@ -270,7 +348,7 @@ abstract class StreamBase(
       videoEncoderRecord.requestKeyframe()
     }
     recordController.startRecord(path, listener, usedTracks)
-    if (!isStreaming) startSources()
+    if (!isStreaming && !isWarm) startSources()
   }
 
   /**
@@ -281,7 +359,7 @@ abstract class StreamBase(
    */
   fun stopRecord(): Boolean {
     recordController.stopRecord()
-    if (!isStreaming) {
+    if (!isStreaming && !isWarm) {
       stopSources()
       return prepareEncoders()
     }
@@ -349,6 +427,13 @@ abstract class StreamBase(
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
       videoSource.start(glInterface.surfaceTexture)
+      // A running encoder whose camera was restarted has no producer until the
+      // direct surface is back in the session — measured: a warm 240 fps arm
+      // whose viewfinder was re-attached after warm-up produced 4 frames and
+      // then nothing, the camera reporting one 60 fps preview stream.
+      if (videoEncoder.isRunning && !differentRecordResolution) {
+        (videoSource as? Camera2Source)?.attachDirectVideoSurface(videoEncoder.inputSurface)
+      }
     }
     glInterface.attachPreview(surface)
     glInterface.setPreviewResolution(width, height)
@@ -361,9 +446,10 @@ abstract class StreamBase(
   @JvmOverloads
   fun stopPreview(removeCallbacks: Boolean = false) {
     isOnPreview = false
-    if (!isStreaming && !isRecording) videoSource.stop()
+    // A WARM pipeline keeps its camera: the encoder is being fed from it.
+    if (!isStreaming && !isRecording && !isWarm) videoSource.stop()
     glInterface.deAttachPreview()
-    if (!isStreaming && !isRecording) glInterface.stop()
+    if (!isStreaming && !isRecording && !isWarm) glInterface.stop()
     if (removeCallbacks) previewCallback.removeCallbacks()
   }
 
@@ -659,6 +745,7 @@ abstract class StreamBase(
 
     override fun getVideoData(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
       fpsListener.calculateFps()
+      frameListener?.invoke(info.presentationTimeUs, (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0)
       if (!differentRecordResolution) recordController.recordVideo(videoBuffer, info)
       getVideoDataImp(videoBuffer, info)
     }

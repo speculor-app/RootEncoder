@@ -44,7 +44,9 @@ abstract class AsyncBaseRecordController : RecordController {
 
   companion object {
     const val TAG: String = "AsyncRecordController"
-    private const val CAPACITY = 500
+    // Big enough for a flushed pre-roll ring (3 s at 240 fps is ~720 video
+    // frames plus audio) without blocking the flush behind the muxer.
+    private const val CAPACITY = 4096
   }
 
   @Volatile
@@ -62,6 +64,111 @@ abstract class AsyncBaseRecordController : RecordController {
   private val scope = CoroutineScope(Dispatchers.IO)
   private var muxerChannel: Channel<MediaFrame>? = null
   private var muxerJob: Job? = null
+
+  // ── pre-roll ─────────────────────────────────────────────────────────────
+  //
+  // While STOPPED every encoded frame is dropped on the floor. With a pre-roll
+  // the last [preRollUs] of them are KEPT instead — encoded, so a few MB per
+  // second rather than the ~750 MB/s of raw 1080p240 — and on the next
+  // startRecord they are written ahead of the live frames. A take then begins
+  // before the tap that asked for it: the seconds a warm pipeline spends
+  // between the event and the finger are in the file, and the settle gate has
+  // nothing to hold, because a ring from a warm encoder has no cold cadence.
+  // The ring always begins on a video keyframe so the track can open on it.
+
+  /** Microseconds of encoded frames kept while stopped; 0 keeps none. */
+  @Volatile var preRollUs = 0L
+  /** Hard cap on the ring, bytes, whatever [preRollUs] asks. */
+  @Volatile var preRollMaxBytes = 96L shl 20
+  /** Frames written from the ring by the last startRecord; 0 when none were. */
+  @Volatile var preRollFlushedFrames = 0
+    private set
+  /** Raw span the last flushed ring covered, µs, from its first video frame to the tap. */
+  @Volatile var preRollFlushedUs = 0L
+    private set
+  private val ringLock = Any()
+  private val ring = ArrayDeque<MediaFrame>()   // raw encoder timestamps, not rebased
+  private var ringBytes = 0L
+  private var ringPending = false                // start() has run, the ring is not flushed yet
+
+  private fun ringAdd(buffer: ByteBuffer, info: MediaCodec.BufferInfo, type: MediaFrame.Type) {
+    var raw = info.toMediaFrameInfo()
+    // The NAL header is read as well as the flag, as the muxer does: a ring
+    // that begins on a frame the muxer will not open the track on is dropped
+    // up to a GOP later.
+    if (type == MediaFrame.Type.VIDEO && !raw.isKeyFrame && isKeyFrame(buffer)) raw = raw.copy(isKeyFrame = true)
+    val frame = MediaFrame(buffer.clone(), raw, type)
+    ring.addLast(frame)
+    ringBytes += raw.size
+    // Only a VIDEO timestamp measures the ring's age: the audio encoder's
+    // timeline is its own (measured: a P20 Pro's audio ran ~3 s ahead of its
+    // video, and trimming on it cut the ring to 1.9 s of an asked 3).
+    if (type == MediaFrame.Type.VIDEO) trimRing(raw.timestamp)
+  }
+
+  /** Drop everything before the latest video keyframe that is at least [preRollUs] old, and keep under the byte cap. */
+  private fun trimRing(newestUs: Long) {
+    val head = ring.firstOrNull { it.type == MediaFrame.Type.VIDEO } ?: return
+    if (newestUs - head.info.timestamp <= preRollUs && ringBytes <= preRollMaxBytes) return
+    var cut = -1
+    var i = 0
+    for (f in ring) {
+      if (f.type == MediaFrame.Type.VIDEO && f.info.isKeyFrame && newestUs - f.info.timestamp >= preRollUs) cut = i
+      i++
+    }
+    repeat(cut.coerceAtLeast(0)) { ringBytes -= ring.removeFirst().info.size }
+    // Over the byte cap even so: drop to the next keyframe, and again, until under it.
+    while (ringBytes > preRollMaxBytes && ring.size > 1) {
+      ringBytes -= ring.removeFirst().info.size
+      while (ring.size > 1 && !(ring.first().type == MediaFrame.Type.VIDEO && ring.first().info.isKeyFrame)) ringBytes -= ring.removeFirst().info.size
+    }
+  }
+
+  /**
+   * Called once the muxer exists: the ring goes first, rebased like everything
+   * after it. The lock is held only to swap the ring out — never across a send,
+   * which can block on the channel while the encoder thread waits to append —
+   * and the flushed COUNT is published before the first frame is sent, because
+   * the muxer consults it (to bypass the settle gate) on another thread.
+   */
+  private fun flushPreRoll() {
+    val channel = muxerChannel
+    var firstVideo = -1L
+    var lastVideo = -1L
+    var videoFrames = 0
+    while (true) {
+      val batch: List<MediaFrame>
+      synchronized(ringLock) {
+        if (ring.isEmpty() || channel == null) {
+          ringPending = false
+          ring.clear(); ringBytes = 0
+          batch = emptyList()
+        } else {
+          batch = ArrayList(ring)
+          ring.clear(); ringBytes = 0
+        }
+      }
+      if (batch.isEmpty()) break
+      for (f in batch) {
+        if (f.type == MediaFrame.Type.VIDEO) {
+          if (firstVideo < 0) firstVideo = f.info.timestamp
+          lastVideo = f.info.timestamp
+          videoFrames++
+        }
+      }
+      // Visible to the muxer before any ring frame reaches it.
+      preRollFlushedFrames = videoFrames
+      for (f in batch) {
+        val rebased = MediaFrame(f.data, updateFormat(f.info), f.type)
+        if (!channel!!.trySend(rebased).isSuccess) runBlocking { channel.send(rebased) }
+      }
+    }
+    preRollFlushedFrames = videoFrames
+    preRollFlushedUs = if (firstVideo >= 0 && lastVideo >= 0) lastVideo - firstVideo else 0L
+  }
+
+  /** The encoder's own timestamp of a frame the muxer rebased to the file, µs. */
+  protected fun rawTimestampUs(rebasedUs: Long): Long = rebasedUs + startTs + pauseTime
 
   override fun setRequestKeyFrame(requestKeyFrame: RequestKeyFrame?) {
     this.myRequestKeyFrame = requestKeyFrame
@@ -137,7 +244,14 @@ abstract class AsyncBaseRecordController : RecordController {
   }
 
   private fun sendFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo, type: MediaFrame.Type) {
-    if (recordStatus == RecordController.Status.STOPPED) return
+    if (recordStatus == RecordController.Status.STOPPED) {
+      if (preRollUs > 0) synchronized(ringLock) { ringAdd(buffer, info, type) }
+      return
+    }
+    // Between start() and the flush a live frame must not overtake the ring.
+    synchronized(ringLock) {
+      if (ringPending) { ringAdd(buffer, info, type); return }
+    }
     val frameInfo = info.toMediaFrameInfo()
     val i = updateFormat(frameInfo)
     muxerChannel?.trySend(MediaFrame(buffer.clone(), i, type))
@@ -155,6 +269,7 @@ abstract class AsyncBaseRecordController : RecordController {
       stopRecord()
       throw e
     }
+    flushPreRoll()
   }
 
   override fun startRecord(
@@ -169,6 +284,7 @@ abstract class AsyncBaseRecordController : RecordController {
       stopRecord()
       throw e
     }
+    flushPreRoll()
   }
 
   private fun start(
@@ -176,6 +292,12 @@ abstract class AsyncBaseRecordController : RecordController {
     tracks: RecordTracks
   ) {
     clearTimestamp()
+    preRollFlushedFrames = 0
+    preRollFlushedUs = 0L
+    synchronized(ringLock) {
+      ringPending = preRollUs > 0
+      if (!ringPending) { ring.clear(); ringBytes = 0 }
+    }
     muxerChannel = Channel(CAPACITY)
     muxerJob = scope.launch {
       val channel = muxerChannel ?: return@launch
@@ -193,6 +315,7 @@ abstract class AsyncBaseRecordController : RecordController {
   }
 
   override fun stopRecord() {
+    synchronized(ringLock) { ringPending = false }
     muxerChannel?.close()
     muxerChannel = null
     muxerJob?.cancel()
