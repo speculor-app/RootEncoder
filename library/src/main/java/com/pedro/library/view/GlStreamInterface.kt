@@ -47,6 +47,7 @@ import com.pedro.library.view.preview.PreviewSurfaceInfo
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -166,8 +167,21 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     return mainRender.getSurface()
   }
 
+  /**
+   * Submit GL work, or do nothing when the interface is stopping: stop() shuts
+   * the executor down, and a submit on it throws RejectedExecutionException —
+   * which escaped stopSources() on a stopRecord that raced the viewfinder's
+   * own teardown and left a 78 MB take unsaved (P20 Pro, 2026-09-12). A
+   * surface manager the executor no longer serves is released by stop() itself.
+   */
+  private fun glSubmit(code: () -> Unit) {
+    val ex = executor ?: return
+    if (ex.isShutdown || ex.isTerminated) return
+    try { ex.submit { code() } } catch (_: RejectedExecutionException) {}
+  }
+
   override fun addMediaCodecSurface(surface: Surface) {
-    executor?.submit {
+    glSubmit {
       if (surfaceManager.isReady) {
         surfaceManagerEncoder.release()
         surfaceManagerEncoder.eglSetup(surface, surfaceManager)
@@ -176,13 +190,11 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun removeMediaCodecSurface() {
-    executor?.submit {
-      surfaceManagerEncoder.release()
-    }
+    glSubmit { surfaceManagerEncoder.release() }
   }
 
   override fun addMediaCodecRecordSurface(surface: Surface) {
-    executor?.submit {
+    glSubmit {
       if (surfaceManager.isReady) {
         surfaceManagerEncoderRecord.release()
         surfaceManagerEncoderRecord.eglSetup(surface, surfaceManager)
@@ -191,9 +203,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun removeMediaCodecRecordSurface() {
-    executor?.submit {
-      surfaceManagerEncoderRecord.release()
-    }
+    glSubmit { surfaceManagerEncoderRecord.release() }
   }
 
   override fun takePhoto(takePhotoCallback: TakePhotoCallback?) {
