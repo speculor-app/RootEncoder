@@ -89,7 +89,16 @@ abstract class AsyncBaseRecordController : RecordController {
   private val ringLock = Any()
   private val ring = ArrayDeque<MediaFrame>()   // raw encoder timestamps, not rebased
   private var ringBytes = 0L
+  /** Newest VIDEO timestamp in the ring; how a timeline restart is noticed. */
+  private var ringNewestVideoUs = Long.MIN_VALUE
   private var ringPending = false                // start() has run, the ring is not flushed yet
+
+  /** Empty the ring and forget where its timeline was. */
+  private fun clearRing() {
+    ring.clear()
+    ringBytes = 0
+    ringNewestVideoUs = Long.MIN_VALUE
+  }
 
   private fun ringAdd(buffer: ByteBuffer, info: MediaCodec.BufferInfo, type: MediaFrame.Type) {
     var raw = info.toMediaFrameInfo()
@@ -97,6 +106,28 @@ abstract class AsyncBaseRecordController : RecordController {
     // that begins on a frame the muxer will not open the track on is dropped
     // up to a GOP later.
     if (type == MediaFrame.Type.VIDEO && !raw.isKeyFrame && isKeyFrame(buffer)) raw = raw.copy(isKeyFrame = true)
+    // A VIDEO frame OLDER than the ring's newest means the ENCODER RESTARTED ITS
+    // TIMELINE — every prepareVideo does, and the geometry may have changed with
+    // it. The frames behind it describe a configuration that no longer exists:
+    // flushed into the next file they arrive ahead of the take carrying
+    // timestamps from a dead clock, and [trimRing] can no longer even measure the
+    // ring's age, because `newest - head` goes NEGATIVE, reads as younger than
+    // [preRollUs], and trims nothing — so the ring grows to [preRollMaxBytes] and
+    // all of it is written.
+    //
+    // Measured on a Magic5 Pro (2026-09-15) switching capture mode between takes:
+    // `preRoll=2406f/-224609ms`, a 109 MB ring on a 13-second take, and a
+    // manifest placing the video 224 s AFTER the tap. The file played for a
+    // moment and then failed, which is what frames of another configuration look
+    // like to a decoder.
+    //
+    // Noticed from INSIDE rather than announced from outside: a restart has many
+    // causes — a mode change, a lens change, a codec change, a recovery reopen —
+    // and a ring that can see one needs to be told about none of them.
+    if (type == MediaFrame.Type.VIDEO) {
+      if (raw.timestamp < ringNewestVideoUs) clearRing()
+      ringNewestVideoUs = raw.timestamp
+    }
     val frame = MediaFrame(buffer.clone(), raw, type)
     ring.addLast(frame)
     ringBytes += raw.size
@@ -141,11 +172,11 @@ abstract class AsyncBaseRecordController : RecordController {
       synchronized(ringLock) {
         if (ring.isEmpty() || channel == null) {
           ringPending = false
-          ring.clear(); ringBytes = 0
+          clearRing()
           batch = emptyList()
         } else {
           batch = ArrayList(ring)
-          ring.clear(); ringBytes = 0
+          clearRing()
         }
       }
       if (batch.isEmpty()) break
@@ -164,7 +195,11 @@ abstract class AsyncBaseRecordController : RecordController {
       }
     }
     preRollFlushedFrames = videoFrames
-    preRollFlushedUs = if (firstVideo >= 0 && lastVideo >= 0) lastVideo - firstVideo else 0L
+    // A duration, so never negative: with the detection above it cannot happen,
+    // and if it ever does the caller must not be handed a number that reads as a
+    // ring reaching into the future.
+    preRollFlushedUs =
+      if (firstVideo >= 0 && lastVideo >= 0) (lastVideo - firstVideo).coerceAtLeast(0L) else 0L
   }
 
   /** The encoder's own timestamp of a frame the muxer rebased to the file, µs. */
@@ -296,7 +331,7 @@ abstract class AsyncBaseRecordController : RecordController {
     preRollFlushedUs = 0L
     synchronized(ringLock) {
       ringPending = preRollUs > 0
-      if (!ringPending) { ring.clear(); ringBytes = 0 }
+      if (!ringPending) clearRing()
     }
     muxerChannel = Channel(CAPACITY)
     muxerJob = scope.launch {
