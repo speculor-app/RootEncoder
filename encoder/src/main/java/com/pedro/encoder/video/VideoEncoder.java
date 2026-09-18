@@ -178,8 +178,26 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         // MediaFormat.KEY_LEVEL, API > 23
         videoFormat.setInteger("level", this.level);
       }
-      // Set BT.709 color metadata so the encoder embeds correct VUI in the SPS NAL unit.
-      // Without this, devices default to smpte170m/bt470bg which ffprobe/players read incorrectly.
+      // Force BT.709 color metadata into the VUI. OFF BY DEFAULT, and it should
+      // stay off unless a device has been MEASURED to need it.
+      //
+      // The comment here used to say devices "default to smpte170m/bt470bg which
+      // ffprobe/players read incorrectly". That is not true on every device and is
+      // measurably false on a Honor Magic5 Pro (Kalama), checked 2026-09-18:
+      //
+      //   * the pixels really are BT.601. A chart of saturated primaries was filmed
+      //     and decoded both ways: under BT.709 the green bar resolves to a NEGATIVE
+      //     red, which cannot happen, and the out-of-gamut penalty over six bars was
+      //     31 for BT.601 against 58 for BT.709.
+      //   * the pixels really are FULL range: luma spans 0..255 with 7.3% of samples
+      //     below 16 -- so COLOR_RANGE_LIMITED below is wrong for this device too.
+      //   * the stock camera app writes the SAME tagging, so smpte170m/bt470bg is
+      //     what this pipeline genuinely produces rather than a defect.
+      //
+      // Turning this on there would relabel correct pixels as something they are
+      // not, and `spsColorPatcher` would carry the same claim into the bitstream
+      // where no container rewrite can undo it. Measure the device first.
+      //
       // KEY_COLOR_STANDARD / KEY_COLOR_TRANSFER / KEY_COLOR_RANGE added in API 24.
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && forceBt709Color) {
         videoFormat.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);  // primaries + matrix = BT.709
@@ -334,6 +352,16 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     fpsLimiter.setFPS(fps);
   }
 
+  /**
+   * Relabel the encoded stream as BT.709 -- in the MediaFormat and, through
+   * {@code spsColorPatcher}, in the SPS VUI itself.
+   *
+   * ONLY for a device measured to produce BT.709 pixels while tagging them 601.
+   * It changes what the file CLAIMS, never what the pixels are, so on a device
+   * that is honestly 601 it turns a correct file into a wrong one. See the note
+   * in {@code prepare()} for the measurement on a Magic5 Pro, where it is wrong
+   * on both the matrix and the range.
+   */
   public void forceBt709Color(boolean enabled) {
     if (prepared) throw new IllegalStateException("Encoder already prepared, this must be called before prepareVideo");
     this.forceBt709Color = enabled;
