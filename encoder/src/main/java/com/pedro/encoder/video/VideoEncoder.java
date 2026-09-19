@@ -83,6 +83,25 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int level = -1;
   private final SpsColorPatcher spsColorPatcher = new SpsColorPatcher();
   private boolean forceBt709Color = false;
+  /**
+   * Explicit colour metadata, or null to write none — the 10-bit route.
+   *
+   * [forceBt709Color] answers only one question, "is this BT.709 SDR", and a
+   * 10-bit stream needs a different answer: HLG is BT.2020 primaries with the
+   * ARIB STD-B67 transfer, PQ is BT.2020 with SMPTE ST 2084, and a player that
+   * finds neither treats the file as SDR and shows it washed out or flat. So the
+   * boolean became a CHOICE, and the boolean stays for the SDR case it already
+   * serves — including `spsColorPatcher`, which rewrites the SPS to claim BT.709
+   * and must never run over an HDR transfer.
+   *
+   * Each is applied only when set, because a device that tags correctly by itself
+   * is better left alone: on a Magic5 Pro the pixels really are BT.601 FULL range
+   * and the stock camera writes the same, so asserting anything there would
+   * relabel correct pixels as something they are not.
+   */
+  private Integer colorStandard = null;
+  private Integer colorTransfer = null;
+  private Integer colorRange = null;
 
   public VideoEncoder(GetVideoData getVideoData) {
     this.getVideoData = getVideoData;
@@ -199,10 +218,25 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       // where no container rewrite can undo it. Measure the device first.
       //
       // KEY_COLOR_STANDARD / KEY_COLOR_TRANSFER / KEY_COLOR_RANGE added in API 24.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && forceBt709Color) {
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);  // primaries + matrix = BT.709
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO); // transfer = BT.709 (gamma)
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);        // TV range (16-235)
+      // An explicit choice wins; the BT.709 flag above serves the SDR case alone.
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        if (colorStandard != null || colorTransfer != null || colorRange != null) {
+          // AN EXPLICIT CHOICE, which is how 10-bit is asked for: BT.2020 with
+          // HLG or with PQ. Each key independently, so a caller can state the
+          // transfer without asserting a range it has not measured.
+          if (colorStandard != null) videoFormat.setInteger(MediaFormat.KEY_COLOR_STANDARD, colorStandard);
+          if (colorTransfer != null) videoFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER, colorTransfer);
+          if (colorRange != null) videoFormat.setInteger(MediaFormat.KEY_COLOR_RANGE, colorRange);
+          if (hdrStaticInfo != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            videoFormat.setByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO, hdrStaticInfo.duplicate());
+          }
+          Log.i(TAG, "colour: standard=" + colorStandard + " transfer=" + colorTransfer
+              + " range=" + colorRange + " hdrStaticInfo=" + (hdrStaticInfo != null));
+        } else if (forceBt709Color) {
+          videoFormat.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);  // primaries + matrix = BT.709
+          videoFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO); // transfer = BT.709 (gamma)
+          videoFormat.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);        // TV range (16-235)
+        }
       }
       setCallback();
       codec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
@@ -366,6 +400,39 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     if (prepared) throw new IllegalStateException("Encoder already prepared, this must be called before prepareVideo");
     this.forceBt709Color = enabled;
   }
+
+  /**
+   * State the colour metadata the encoder should write, each key or null to
+   * leave it unstated. Takes precedence over {@link #forceBt709Color(boolean)}.
+   *
+   * For HLG10: BT.2020 with COLOR_TRANSFER_HLG. For HDR10: BT.2020 with
+   * COLOR_TRANSFER_ST2084, and the stream also wants its ST 2086 mastering
+   * metadata, which is {@link #setHdrStaticInfo(ByteBuffer)}.
+   *
+   * Measured on a Magic5 Pro, 2026-09-19: the encoder honoured
+   * COLOR_RANGE_LIMITED for HLG and IGNORED it for PQ and for SDR, both of which
+   * came back full range. So the range a file GOT has to be read from the file,
+   * never assumed from what was asked.
+   */
+  public void setColorMetadata(Integer standard, Integer transfer, Integer range) {
+    if (prepared) throw new IllegalStateException("Encoder already prepared, this must be called before prepareVideo");
+    this.colorStandard = standard;
+    this.colorTransfer = transfer;
+    this.colorRange = range;
+  }
+
+  /**
+   * ST 2086 mastering-display metadata, the 25-byte CTA-861.3 blob HDR10 needs.
+   *
+   * PQ without it is a stream a player has to guess at. HLG carries its own
+   * transfer and needs none, so null is right there.
+   */
+  public void setHdrStaticInfo(java.nio.ByteBuffer info) {
+    if (prepared) throw new IllegalStateException("Encoder already prepared, this must be called before prepareVideo");
+    this.hdrStaticInfo = info;
+  }
+
+  private java.nio.ByteBuffer hdrStaticInfo = null;
 
   @Override
   public void inputYUVData(@NonNull Frame frame) {

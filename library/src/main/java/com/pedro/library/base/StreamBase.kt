@@ -235,6 +235,30 @@ abstract class StreamBase(
   }
 
   /**
+   * The colour metadata the video encoder will write, each key or null to leave
+   * it unstated, plus the ST 2086 mastering blob HDR10 needs.
+   *
+   * Must be called BEFORE prepareVideo: the encoder reads these while building
+   * its MediaFormat. Pairs with `prepareVideo(..., profile = ...)`, which is what
+   * selects a 10-bit encoder profile — a Main10 profile without BT.2020 and an
+   * HDR transfer produces a 10-bit file that every player treats as SDR, and the
+   * colour keys without the profile produce an 8-bit file claiming to be HDR.
+   * Both halves or neither.
+   */
+  @JvmOverloads
+  fun setVideoColorMetadata(
+    standard: Int? = null, transfer: Int? = null, range: Int? = null,
+    hdrStaticInfo: java.nio.ByteBuffer? = null,
+  ) {
+    videoEncoder.setColorMetadata(standard, transfer, range)
+    videoEncoder.setHdrStaticInfo(hdrStaticInfo)
+    if (differentRecordResolution) {
+      videoEncoderRecord.setColorMetadata(standard, transfer, range)
+      videoEncoderRecord.setHdrStaticInfo(hdrStaticInfo)
+    }
+  }
+
+  /**
    * Necessary only one time before start stream or record.
    * If you want change values stop stream and record is necessary.
    *
