@@ -391,4 +391,17 @@ class Camera2Source(context: Context): VideoSource() {
   fun setDynamicFps(enabled: Boolean) {
     camera.dynamicFps = enabled
   }
+
+  /**
+   * Ask the camera for a 10-bit dynamic-range profile on the DIRECT video
+   * surface. `DynamicRangeProfiles.STANDARD` (1) leaves the session 8-bit.
+   *
+   * Session-lifetime, like [setDynamicFps]: read when the session is built, so
+   * it must be set before the camera opens.
+   */
+  fun setVideoDynamicRangeProfile(profile: Long) {
+    camera.videoDynamicRangeProfile = profile
+  }
+
+  fun getVideoDynamicRangeProfile(): Long = camera.videoDynamicRangeProfile
 }

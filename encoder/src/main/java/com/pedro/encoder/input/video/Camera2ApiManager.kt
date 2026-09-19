@@ -70,6 +70,15 @@ import kotlin.math.roundToInt
  * Note: you can use opengl for surfaceEncoder to buffer encoder on devices 21 < API > 16:
  * https://github.com/google/grafika
  */
+/**
+ * `DynamicRangeProfiles.STANDARD` — the ordinary 8-bit profile every camera has.
+ *
+ * Spelled out rather than imported because the class arrived in API 33 and this
+ * file targets 21. The value is a Java `static final long`, so a reference would
+ * inline to the same thing; naming it keeps the API level out of the imports.
+ */
+private const val DYNAMIC_RANGE_STANDARD = 1L
+
 @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
 class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     private val TAG = "Camera2ApiManager"
@@ -1292,6 +1301,28 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
 
     @Suppress("DEPRECATION")
     @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
+    /**
+     * The dynamic-range profile for the DIRECT VIDEO surface — 10-bit capture.
+     *
+     * A value from `DynamicRangeProfiles` (`HLG10`, `HDR10`, …), or
+     * [DYNAMIC_RANGE_STANDARD] to leave the session 8-bit as before. It rides on
+     * the direct video surface ALONE, never on the preview: a module advertises
+     * which profiles may share one session and a Magic5 Pro allows
+     * `HLG10 with STANDARD, HLG10` but never HLG10 beside HDR10, so an SDR
+     * viewfinder is legal next to a 10-bit capture and a second 10-bit flavour is
+     * not.
+     *
+     * Read when the session is BUILT, like [highSpeed] and [dynamicFps], so it
+     * must be set before the camera opens; setting it afterwards changes nothing
+     * until the next session.
+     *
+     * Only the caller knows whether the module advertises the profile
+     * (`REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES`) and whether the encoder is
+     * configured for a 10-bit profile to match. Asking for one here without the
+     * other fails the whole configuration.
+     */
+    var videoDynamicRangeProfile: Long = DYNAMIC_RANGE_STANDARD
+
     private fun createCaptureSession(
         cameraDevice: CameraDevice,
         surfaces: List<Surface>,
@@ -1311,8 +1342,27 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         if (highSpeed) {
             cameraDevice.createConstrainedHighSpeedCaptureSession(surfaces, callback, handler)
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val configurations = surfaces.map { OutputConfiguration(it) }
-            configurations.forEach { it.setPhysicalCameraId(physicalCameraId) }
+            val direct = directVideoSurface
+            val configurations = surfaces.map { surface ->
+                OutputConfiguration(surface).also { output ->
+                    output.setPhysicalCameraId(physicalCameraId)
+                    // 10-BIT RIDES ON THE ENCODER'S SURFACE AND NOTHING ELSE.
+                    //
+                    // The preview stays STANDARD, which is what makes a 10-bit
+                    // take viewable at all: the profile constraints allow
+                    // `HLG10 with STANDARD` and a viewfinder in HLG10 would have
+                    // to be tone-mapped by the app for an SDR panel. Putting it
+                    // on every surface would also drag in the still/YUV reader,
+                    // which no module advertises in a 10-bit profile.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        videoDynamicRangeProfile != DYNAMIC_RANGE_STANDARD &&
+                        direct != null && surface === direct
+                    ) {
+                        output.dynamicRangeProfile = videoDynamicRangeProfile
+                        Log.i(TAG, "dynamic range profile $videoDynamicRangeProfile on the direct video surface")
+                    }
+                }
+            }
             val config = SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
                 configurations,
