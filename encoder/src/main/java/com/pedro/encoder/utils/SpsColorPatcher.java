@@ -45,22 +45,31 @@ public final class SpsColorPatcher {
      * Auto-detects H.264 vs H.265 from the MIME type.
      */
     public void patchMediaFormatColorToBt709(MediaFormat format) {
+        patchMediaFormatColor(format, 1, 1, 1);
+    }
+
+    /**
+     * Patches csd-0 in a MediaFormat in-place before mediaMuxer.addTrack(), each
+     * VUI colour field on its own: a null leaves that field as the encoder wrote
+     * it. Auto-detects H.264 vs H.265 from the MIME type.
+     */
+    public void patchMediaFormatColor(MediaFormat format, Integer primaries, Integer transfer, Integer matrix) {
         if (format == null || !format.containsKey("csd-0"))
             return;
         ByteBuffer csd0 = format.getByteBuffer("csd-0");
         String mime = format.containsKey(MediaFormat.KEY_MIME) ? format.getString(MediaFormat.KEY_MIME) : "";
         ByteBuffer patched;
         if ("video/hevc".equals(mime)) {
-            patched = patchSpsNalColorToBt709(csd0, true);
+            patched = patchSpsNalColor(csd0, true, primaries, transfer, matrix);
         } else {
             // Try H.264 first; fall back to H.265 scan
-            patched = patchSpsNalColorToBt709(csd0, false);
+            patched = patchSpsNalColor(csd0, false, primaries, transfer, matrix);
             if (patched == csd0)
-                patched = patchSpsNalColorToBt709(csd0, true);
+                patched = patchSpsNalColor(csd0, true, primaries, transfer, matrix);
         }
         if (patched != csd0) {
             format.setByteBuffer("csd-0", patched);
-            Log.d(TAG, "csd-0 patched with BT.709 colour info");
+            Log.d(TAG, "csd-0 patched: primaries=" + primaries + " transfer=" + transfer + " matrix=" + matrix);
         }
     }
 
@@ -78,7 +87,25 @@ public final class SpsColorPatcher {
      *         failed/not needed
      */
     public ByteBuffer patchSpsNalColorToBt709(ByteBuffer spsData, boolean isHevc) {
+        return patchSpsNalColor(spsData, isHevc, 1, 1, 1);
+    }
+
+    /**
+     * Patches the VUI colour fields of a raw SPS NAL, each on its own: a null
+     * leaves that field as the encoder wrote it. What the pixels ARE is the
+     * caller's measurement to make; this only writes the claim it was handed.
+     * A Magic5 Pro (2026-09-20) applies the HLG and PQ curves and never remaps
+     * the gamut, so its 10-bit files want BT.709 primaries (1) under an HDR
+     * transfer, a combination no MediaFormat key can express and no hardware
+     * encoder here honours through one.
+     *
+     * @return Patched ByteBuffer (new allocation), or original if patching
+     *         failed/not needed
+     */
+    public ByteBuffer patchSpsNalColor(ByteBuffer spsData, boolean isHevc, Integer primaries, Integer transfer, Integer matrix) {
         if (spsData == null || spsData.remaining() < 4)
+            return spsData;
+        if (primaries == null && transfer == null && matrix == null)
             return spsData;
         byte[] data = new byte[spsData.remaining()];
         int savedPos = spsData.position();
@@ -86,15 +113,20 @@ public final class SpsColorPatcher {
         spsData.position(savedPos);
 
         return isHevc
-                ? patchH265(data)
-                : patchH264(data);
+                ? patchH265(data, primaries, transfer, matrix)
+                : patchH264(data, primaries, transfer, matrix);
+    }
+
+    /** Write a field, or step over it when the caller left it null. */
+    private static void writeOrSkip(BitReader br, Integer value) {
+        if (value != null) br.writeBits(value, 8); else br.skipBits(8);
     }
 
     // -------------------------------------------------------------------------
     // H.264 SPS patcher
     // -------------------------------------------------------------------------
 
-    private ByteBuffer patchH264(byte[] data) {
+    private ByteBuffer patchH264(byte[] data, Integer primaries, Integer transfer, Integer matrix) {
         // Find SPS NAL unit (NAL type 7)
         int spsStart = -1;
         for (int i = 0; i < data.length; i++) {
@@ -174,10 +206,10 @@ public final class SpsColorPatcher {
             if (br.readBits(1) != 0) { // video_signal_type_present_flag
                 br.skipBits(4); // video_format + full_range
                 if (br.readBits(1) != 0) { // colour_description_present_flag
-                    br.writeBits(1, 8); // colour_primaries = BT.709
-                    br.writeBits(1, 8); // transfer_characteristics = BT.709
-                    br.writeBits(1, 8); // matrix_coefficients = BT.709
-                    Log.d(TAG, "H.264 SPS colour patched → BT.709 at bit " + br.getBitPos());
+                    writeOrSkip(br, primaries);  // colour_primaries
+                    writeOrSkip(br, transfer);   // transfer_characteristics
+                    writeOrSkip(br, matrix);     // matrix_coefficients
+                    Log.d(TAG, "H.264 SPS colour patched (" + primaries + "," + transfer + "," + matrix + ") at bit " + br.getBitPos());
                     return ByteBuffer.wrap(patched);
                 }
                 Log.w(TAG, "H.264 colour_description_present_flag=0");
@@ -194,13 +226,26 @@ public final class SpsColorPatcher {
     // H.265 SPS patcher
     // -------------------------------------------------------------------------
 
-    private ByteBuffer patchH265(byte[] data) {
-        // Find H.265 SPS NAL unit (nal_unit_type = 33, 2-byte HEVC NAL header)
+    private ByteBuffer patchH265(byte[] data, Integer primaries, Integer transfer, Integer matrix) {
+        // Find H.265 SPS NAL unit (nal_unit_type = 33, 2-byte HEVC NAL header).
+        // A csd-0 carries VPS, SPS and PPS behind start codes, and a byte inside
+        // the VPS payload can look like a type-33 header, so a header right
+        // after a start code is preferred and the bare scan is the fallback for
+        // a lone SPS handed over without one.
         int spsStart = -1;
-        for (int i = 0; i < data.length - 1; i++) {
-            if (((data[i] >> 1) & 0x3F) == 33) {
-                spsStart = i + 2;
+        for (int i = 0; i + 4 < data.length; i++) {
+            boolean sc3 = data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1;
+            if (sc3 && ((data[i + 3] >> 1) & 0x3F) == 33 && data[i + 4] == 1) {
+                spsStart = i + 5;
                 break;
+            }
+        }
+        if (spsStart < 0) {
+            for (int i = 0; i < data.length - 1; i++) {
+                if (((data[i] >> 1) & 0x3F) == 33) {
+                    spsStart = i + 2;
+                    break;
+                }
             }
         }
         if (spsStart < 0) {
@@ -293,10 +338,10 @@ public final class SpsColorPatcher {
             if (br.readBits(1) != 0) { // video_signal_type_present_flag
                 br.skipBits(4);
                 if (br.readBits(1) != 0) { // colour_description_present_flag
-                    br.writeBits(1, 8);
-                    br.writeBits(1, 8);
-                    br.writeBits(1, 8);
-                    Log.d(TAG, "H.265 SPS colour patched → BT.709 at bit " + br.getBitPos());
+                    writeOrSkip(br, primaries);
+                    writeOrSkip(br, transfer);
+                    writeOrSkip(br, matrix);
+                    Log.d(TAG, "H.265 SPS colour patched (" + primaries + "," + transfer + "," + matrix + ") at bit " + br.getBitPos());
                     return ByteBuffer.wrap(patched);
                 }
                 Log.w(TAG, "H.265 colour_description_present_flag=0");

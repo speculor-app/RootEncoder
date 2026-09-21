@@ -83,6 +83,9 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int level = -1;
   private final SpsColorPatcher spsColorPatcher = new SpsColorPatcher();
   private boolean forceBt709Color = false;
+  // A VUI colour field to write over what the encoder put in the SPS, each on
+  // its own, null = leave it. Reaches the streamed SPS and the muxer's csd-0.
+  private Integer spsPrimaries = null, spsTransfer = null, spsMatrix = null;
   /**
    * Explicit colour metadata, or null to write none — the 10-bit route.
    *
@@ -441,6 +444,34 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     this.hdrStaticInfo = info;
   }
 
+  /**
+   * Write these VUI colour fields over the encoder's own, in the SPS a stream
+   * receives and in the csd-0 the muxer records; a null leaves that field.
+   * For a pipeline that never remaps the gamut but tags BT.2020 (a Magic5 Pro
+   * in HLG10 and HDR10, measured 2026-09-20): primaries 1 (BT.709), transfer
+   * and matrix left. Takes precedence over {@link #forceBt709Color(boolean)}.
+   * The container's own colr box is the muxer's, written from MediaFormat
+   * keys that cannot say "709 primaries, 2020 matrix", so a caller that wants
+   * the container to agree rewrites that box in the closed file.
+   */
+  public void setSpsColorOverride(Integer primaries, Integer transfer, Integer matrix) {
+    if (running) throw new IllegalStateException("Encoder running, this must be called before it starts");
+    this.spsPrimaries = primaries;
+    this.spsTransfer = transfer;
+    this.spsMatrix = matrix;
+  }
+
+  private boolean hasSpsColorOverride() {
+    return spsPrimaries != null || spsTransfer != null || spsMatrix != null;
+  }
+
+  /** The SPS as the world should see it: the override first, the BT.709 relabel second, else as encoded. */
+  private ByteBuffer patchedSps(ByteBuffer sps, boolean isHevc) {
+    if (hasSpsColorOverride()) return spsColorPatcher.patchSpsNalColor(sps, isHevc, spsPrimaries, spsTransfer, spsMatrix);
+    if (forceBt709Color) return spsColorPatcher.patchSpsNalColorToBt709(sps, isHevc);
+    return sps;
+  }
+
   private java.nio.ByteBuffer hdrStaticInfo = null;
 
   @Override
@@ -465,7 +496,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       ByteBuffer bufferInfo = mediaFormat.getByteBuffer("csd-0");
       if (bufferInfo != null) {
         List<ByteBuffer> byteBufferList = VideoEncoderHelper.extractVpsSpsPpsFromH265(bufferInfo.duplicate());
-        oldSps = forceBt709Color ? spsColorPatcher.patchSpsNalColorToBt709(byteBufferList.get(1), true) : byteBufferList.get(1);
+        oldSps = patchedSps(byteBufferList.get(1), true);
         oldPps = byteBufferList.get(2);
         oldVps = byteBufferList.get(0);
         getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
@@ -476,7 +507,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       ByteBuffer sps = mediaFormat.getByteBuffer("csd-0");
       ByteBuffer pps = mediaFormat.getByteBuffer("csd-1");
       if (sps != null && pps != null) {
-        oldSps = forceBt709Color ? spsColorPatcher.patchSpsNalColorToBt709(sps.duplicate(), false) : sps.duplicate();
+        oldSps = patchedSps(sps.duplicate(), false);
         oldPps = pps.duplicate();
         oldVps = null;
         getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
@@ -550,6 +581,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   @Override
   public void formatChanged(@NonNull MediaCodec mediaCodec, @NonNull MediaFormat mediaFormat) {
+    // The recorder hands this format to MediaMuxer.addTrack, whose hvcC/avcC
+    // carries csd-0 as is: the override has to be in it, or the file's SPS
+    // disagrees with the stream's.
+    if (hasSpsColorOverride()) spsColorPatcher.patchMediaFormatColor(mediaFormat, spsPrimaries, spsTransfer, spsMatrix);
     getVideoData.onVideoFormat(mediaFormat);
     spsPpsSetted = sendSPSandPPS(mediaFormat);
   }

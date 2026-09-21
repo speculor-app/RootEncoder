@@ -259,6 +259,18 @@ abstract class StreamBase(
   }
 
   /**
+   * Write these VUI colour fields over the encoder's own in the SPS, each on
+   * its own (null = leave): for a pipeline that never remaps the gamut but tags
+   * BT.2020, primaries 1 under the HDR transfer it does apply. See
+   * [VideoEncoder.setSpsColorOverride]; the container's colr box is not this
+   * library's and stays the muxer's.
+   */
+  fun setVideoSpsColorOverride(primaries: Int?, transfer: Int?, matrix: Int?) {
+    videoEncoder.setSpsColorOverride(primaries, transfer, matrix)
+    if (differentRecordResolution) videoEncoderRecord.setSpsColorOverride(primaries, transfer, matrix)
+  }
+
+  /**
    * Necessary only one time before start stream or record.
    * If you want change values stop stream and record is necessary.
    *
