@@ -386,6 +386,15 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     fpsLimiter.setFPS(fps);
   }
 
+  // The three colour setters refuse only while the encoder RUNS. They used to
+  // refuse while it was PREPARED, and a caller that re-prepares -- a lens switch
+  // or a rate change on speculor-mobile-sensor -- sets them before its next
+  // prepareVideo while the previous configuration is still prepared, so every
+  // one of them was refused and the new configuration silently kept the old
+  // keys: under HLG10 a switch to an SDR module wrote BT.2020 keys under an SDR
+  // profile. prepare() reads the fields when it builds the MediaFormat, which
+  // is after a reconfigure too, so a value set on a prepared, stopped encoder
+  // lands in the next format exactly as one set on a fresh encoder does.
   /**
    * Relabel the encoded stream as BT.709 -- in the MediaFormat and, through
    * {@code spsColorPatcher}, in the SPS VUI itself.
@@ -397,7 +406,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
    * on both the matrix and the range.
    */
   public void forceBt709Color(boolean enabled) {
-    if (prepared) throw new IllegalStateException("Encoder already prepared, this must be called before prepareVideo");
+    if (running) throw new IllegalStateException("Encoder running, this must be called before it starts");
     this.forceBt709Color = enabled;
   }
 
@@ -415,7 +424,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
    * never assumed from what was asked.
    */
   public void setColorMetadata(Integer standard, Integer transfer, Integer range) {
-    if (prepared) throw new IllegalStateException("Encoder already prepared, this must be called before prepareVideo");
+    if (running) throw new IllegalStateException("Encoder running, this must be called before it starts");
     this.colorStandard = standard;
     this.colorTransfer = transfer;
     this.colorRange = range;
@@ -428,7 +437,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
    * transfer and needs none, so null is right there.
    */
   public void setHdrStaticInfo(java.nio.ByteBuffer info) {
-    if (prepared) throw new IllegalStateException("Encoder already prepared, this must be called before prepareVideo");
+    if (running) throw new IllegalStateException("Encoder running, this must be called before it starts");
     this.hdrStaticInfo = info;
   }
 
