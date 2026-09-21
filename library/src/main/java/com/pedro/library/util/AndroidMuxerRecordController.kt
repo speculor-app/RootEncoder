@@ -18,6 +18,7 @@ package com.pedro.library.util
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.util.Log
 import android.os.Build
 import androidx.annotation.RequiresApi
 import com.pedro.common.AudioCodec
@@ -122,10 +123,23 @@ class AndroidMuxerRecordController : AsyncBaseRecordController() {
   override fun stopRecordImp() {
     videoTrack = -1
     audioTrack = -1
+    // A stop that fails leaves a file with no `moov`: the right size, every
+    // frame in it, unplayable. It used to be swallowed, so the caller finalized
+    // a session around a file nothing could open and nothing said why. Reported
+    // through the listener and remembered in [lastWriteError]; the muxer is
+    // released either way, so the file handle does not leak with the failure.
     try {
       mediaMuxer?.stop()
+    } catch (e: Exception) {
+      Log.e(TAG, "MediaMuxer.stop failed; the file has no index", e)
+      lastWriteError = "stop: $e"
+      listener?.onError(e)
+    }
+    try {
       mediaMuxer?.release()
-    } catch (_: Exception) { }
+    } catch (e: Exception) {
+      Log.e(TAG, "MediaMuxer.release failed", e)
+    }
     mediaMuxer = null
   }
 
