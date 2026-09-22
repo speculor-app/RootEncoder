@@ -187,6 +187,30 @@ abstract class AsyncBaseRecordController : RecordController {
           videoFrames++
         }
       }
+      // ANCHOR THE FILE ON THE RING'S OLDEST FRAME, before a single one is
+      // rebased.
+      //
+      // [updateFormat] takes `startTs` from the first frame it is ever handed
+      // and then clamps with `max(0, ts - startTs)`. Handed a ring, "first" is
+      // whichever type the deque happened to hold at the head — and audio and
+      // video do not arrive on one interleaved order, so every frame OLDER than
+      // that one lands at timestamp 0. A run of frames all at 0 is a frozen
+      // picture on playback, a file span that reads as a fraction of the take,
+      // and sensors that appear to lead the camera by the difference.
+      //
+      // Measured on a Mi 10T Pro (2026-09-22), 3 s ring, ~14 s take: 56 of 149
+      // readable video packets at pts 0.000000 (38 %), video duration 3.13 s
+      // against a true 14 s, avg_frame_rate 124.8. The same take with the ring
+      // off: 1 of 346 at zero, 11.56 s, 29.92 fps. A P20 Pro flushing a DEEPER
+      // ring (126 frames, 4.2 s) was clean, so depth is not the trigger — the
+      // Mi 10T reports `beforeFormat=20`, its whole ring, where the P20 reports
+      // 0.
+      //
+      // The minimum over the WHOLE batch, not the oldest video: an audio frame
+      // older than the first video frame is just as much a frame the file has
+      // to hold, and anchoring past it would flatten that instead.
+      val anchor = batch.minOf { it.info.timestamp }
+      if (startTs <= 0 || anchor < startTs) startTs = anchor
       // Visible to the muxer before any ring frame reaches it.
       preRollFlushedFrames = videoFrames
       for (f in batch) {
