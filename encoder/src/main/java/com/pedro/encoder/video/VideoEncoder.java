@@ -76,6 +76,36 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   public long getFirstTimestampUs() {
     return firstTimestamp;
   }
+
+  /**
+   * The zero every surface-mode PTS is measured from: the moment the encoders
+   * STARTED ({@code presentTimeUs}, the shared start the audio encoder measures
+   * from too), expressed on the camera's own clock.
+   *
+   * It was the first frame's sensor time. The audio track counts from the start,
+   * and the camera's first frame reaches the encoder only once its session is
+   * built and repeating — so the video's zero sat that much LATER than the
+   * audio's, and every sample played that much after the picture it belongs to.
+   * Measured on a Magic5 Pro at 3840x2160@60 with a pre-roll (2026-09-24): audio
+   * starting 1.434 s into the file and overrunning the last video frame by
+   * 1.28 s, the 1.4 s between startSources and the first camera frame.
+   *
+   * {@code presentTimeUs} is on {@link com.pedro.common.TimeUtils}' clock
+   * (elapsedRealtime, BOOTTIME). A camera whose timestamps are BOOTTIME shares
+   * it; one on MONOTONIC is off by the time slept since boot, which is added
+   * back. A source on neither — or a start that would put this frame before it —
+   * keeps the old zero, the frame itself.
+   */
+  private long startOnSourceClockUs(long sourceUs) {
+    long bootUs = SystemClock.elapsedRealtimeNanos() / 1000L;
+    long monoUs = System.nanoTime() / 1000L;
+    long start = presentTimeUs;
+    if (Math.abs(sourceUs - monoUs) < Math.abs(sourceUs - bootUs)) start -= bootUs - monoUs;
+    // More than a minute between the start and the first frame is not a camera
+    // warming up; it is a clock this cannot place.
+    if (start <= 0 || start > sourceUs || sourceUs - start > 60_000_000L) return sourceUs;
+    return start;
+  }
   //for disable video
   private final FpsLimiter fpsLimiter = new FpsLimiter();
   private FormatVideoEncoder formatVideoEncoder = FormatVideoEncoder.YUV420Dynamical;
@@ -647,7 +677,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         // share an origin with the system clock reports unknown rather than nonsense.
         CaptureLatency.report(
             SystemClock.elapsedRealtimeNanos() - bufferInfo.presentationTimeUs * 1000L);
-        if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
+        if (firstTimestamp == 0) firstTimestamp = startOnSourceClockUs(bufferInfo.presentationTimeUs);
         bufferInfo.presentationTimeUs -= firstTimestamp;
       }
     } else {
