@@ -25,6 +25,7 @@ import com.pedro.common.VideoCodec
 import com.pedro.common.base.BaseSender
 import com.pedro.common.frame.MediaFrame
 import com.pedro.common.nal.CaptureTimeSei
+import com.pedro.common.nal.DisplayOrientationSei
 import com.pedro.common.onMainThread
 import com.pedro.common.removeInfo
 import com.pedro.common.socket.base.SocketType
@@ -82,7 +83,24 @@ class RtspSender(
       mediaFrame.info.timestamp * RtpConstants.clockVideoFrequency / 1_000_000L,
       captureNs,
     )
-    super.sendMediaFrame(withCaptureTimeSei(mediaFrame, captureNs))
+    super.sendMediaFrame(withDisplayOrientationSei(withCaptureTimeSei(mediaFrame, captureNs)))
+  }
+
+  /**
+   * The clockwise turn that stands the coded frames upright, declared in the video itself
+   * on every frame (see [DisplayOrientationSei]). 0 sends nothing.
+   */
+  @Volatile
+  var displayRotation: Int = 0
+
+  private fun withDisplayOrientationSei(mediaFrame: MediaFrame): MediaFrame {
+    val sei = DisplayOrientationSei.build(commandsManager.videoCodec, displayRotation)
+      ?: return mediaFrame
+    if (!orientationLogged) {
+      orientationLogged = true
+      Log.i(TAG, "display-orientation SEI: $displayRotation deg, codec ${commandsManager.videoCodec}")
+    }
+    return prepend(sei, mediaFrame)
   }
 
   /**
@@ -114,6 +132,10 @@ class RtspSender(
       seiLogged = true
       Log.i(TAG, "capture-time SEI: ${sei.size} bytes, codec ${commandsManager.videoCodec}")
     }
+    return prepend(sei, mediaFrame)
+  }
+
+  private fun prepend(sei: ByteArray, mediaFrame: MediaFrame): MediaFrame {
     // Build from the payload Info describes, not from the whole buffer, and restate the
     // size. The packetiser slices by offset/size, so reusing the original Info would cut
     // exactly the SEI's length off the tail of every frame — which decodes as a stream
@@ -132,6 +154,7 @@ class RtspSender(
 
   private var seiLogged = false
   private var seiUnsupportedLogged = false
+  private var orientationLogged = false
 
   private var videoPacket: BasePacket = H264Packet(commandsManager.rtpTracks.trackVideo)
   private var audioPacket: BasePacket = AacPacket(commandsManager.rtpTracks.trackAudio)
