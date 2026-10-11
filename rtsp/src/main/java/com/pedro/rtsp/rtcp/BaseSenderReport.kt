@@ -80,6 +80,31 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     lastVideoWallNs = elapsedRealtimeNs
   }
 
+  // The same pairing for the sound, on its own RTP clock (the sample rate).
+  @Volatile
+  private var lastAudioRtpTs: Long = 0
+
+  @Volatile
+  private var lastAudioWallNs: Long = 0
+
+  @Volatile
+  private var audioClockHz: Long = 0
+
+  /** Record when a sound frame was captured, as the video's is, before the send queue. */
+  fun noteAudioTimestamp(rtpTs: Long, clockHz: Long, elapsedRealtimeNs: Long) {
+    lastAudioRtpTs = rtpTs
+    audioClockHz = clockHz
+    lastAudioWallNs = elapsedRealtimeNs
+  }
+
+  /** Capture instant of the sound at [rtpTs] on CLOCK_BOOTTIME, or 0 before any is seen. */
+  private fun audioCaptureTimeOf(rtpTs: Long): Long {
+    val wall = lastAudioWallNs
+    val clock = audioClockHz
+    if (wall == 0L || clock <= 0L) return 0
+    return wall + (rtpTs - lastAudioRtpTs) * 1_000_000_000L / clock
+  }
+
   /** Capture instant of [rtpTs] on CLOCK_BOOTTIME, or 0 before any frame is seen. */
   private fun captureTimeOf(rtpTs: Long): Long {
     val wall = lastVideoWallNs
@@ -142,8 +167,10 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
      * Reporting resumes automatically at the first interval the provider returns a
      * time again.
      *
-     * Applied to the video track only: audio is packetised on a different capture
-     * timeline, so the same conversion would not be valid for it.
+     * Applied to both tracks, each from its own capture instant: the video's from the
+     * camera's output delay, the sound's from the encoder's measure of when each frame
+     * was heard. Both arrive here on CLOCK_BOOTTIME, so one conversion serves both and a
+     * receiver synchronising the tracks by their reports lines them up.
      *
      * Must be cheap and non-blocking: called on the sender path once per report
      * interval.
@@ -265,10 +292,15 @@ abstract class BaseSenderReport internal constructor(private val rtpTracks: RtpT
     audioBuffer.setLong(audioOctetCount, 24, 28)
     if (TimeUtils.getCurrentTimeMillis() - audioTime >= interval) {
       audioTime = TimeUtils.getCurrentTimeMillis()
-      // Device wall clock, not ntpClockProvider: audio presentation times are on the
-      // capture timeline of AudioRecord, which the provider's conversion does not
-      // describe. Epoch clock, not getCurrentTimeNano — see deviceClockProvider.
-      setData(audioBuffer, TimeUtils.getCurrentTimeMillis() * 1_000_000L, rtpFrame.timeStamp)
+      // The sound's capture instant through the same provider as the video's, and the
+      // same rule: no trustworthy time, no report. It used to stamp the device clock
+      // read at send time, which is BOOTTIME here (TimeUtils), so it claimed the sound
+      // was captured in 1970-plus-uptime and late by the whole send queue.
+      val capture = audioCaptureTimeOf(rtpFrame.timeStamp)
+      if (capture == 0L) return false
+      val supplied = ntpClockProvider(capture)
+      if (supplied <= 0L) return false
+      setData(audioBuffer, supplied, rtpFrame.timeStamp)
       cryptoUtils?.let {
         sendReport(encrypt(audioBuffer, srtcpAudioIndex++, ssrcAudio, it), rtpFrame)
       } ?: sendReport(audioBuffer, rtpFrame)

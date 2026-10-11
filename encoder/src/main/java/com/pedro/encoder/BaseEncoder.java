@@ -57,7 +57,9 @@ public abstract class BaseEncoder implements EncoderCallback {
   private volatile long oldTimeStamp = 0L;
   protected boolean shouldReset = true;
   protected boolean prepared = false;
-  private Handler handler;
+  // The thread every async callback runs on; a subclass posts its own input work here
+  // so it is never raced against the callbacks.
+  protected Handler handler;
   private CodecErrorCallback encoderErrorCallback;
   protected String type;
   protected CodecUtil.CodecTypeError typeError;

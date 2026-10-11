@@ -72,6 +72,8 @@ class RtcpReportTest {
         StreamSocket.DEFAULT_TIMEOUT, 0, 1, 2, 3)
       senderReportTcp.setSocket(tcpSocket)
       senderReportTcp.setSSRC(0, 1)
+      // A sound frame's capture instant has been noted, as the sender does on handover.
+      senderReportTcp.noteAudioTimestamp(0, 48_000, 1_000_000_000L)
       val fakeFrameVideo = RtpFrame(byteArrayOf(0x00, 0x00, 0x00), 0, 3, rtpTracks.trackVideo)
       val fakeFrameAudio = RtpFrame(byteArrayOf(0x00, 0x00, 0x00), 0, 3, rtpTracks.trackAudio)
 
@@ -144,12 +146,60 @@ class RtcpReportTest {
   }
 
   @Test
+  fun `GIVEN a noted sound capture WHEN update audio THEN the report carries that capture time through the provider`() = runTest {
+    Utils.useStatics(listOf(timeUtilsMocked)) {
+      val rtpTracks = RtpTracks()
+      val senderReportTcp = BaseSenderReport.getInstance(rtpTracks, SocketType.JAVA, Protocol.TCP, "127.0.0.1",
+        StreamSocket.DEFAULT_TIMEOUT, 0, 1, 2, 3)
+      senderReportTcp.setSocket(tcpSocket)
+      senderReportTcp.setSSRC(0, 1)
+      val previous = BaseSenderReport.ntpClockProvider
+      try {
+        // The provider maps CLOCK_BOOTTIME to epoch: here, a fixed epoch plus boot time.
+        val epochNs = 1_700_000_000_000_000_000L
+        BaseSenderReport.ntpClockProvider = { bootNs -> epochNs + bootNs }
+
+        // No sound noted yet: nothing to say when it was heard, so no report.
+        val early = RtpFrame(byteArrayOf(0x00, 0x00, 0x00), 0, 3, rtpTracks.trackAudio)
+        senderReportTcp.update(early)
+        val body = argumentCaptor<ByteArray>()
+        withContext(Dispatchers.IO) {
+          verify(tcpSocket, times(0)).write(
+            body.capture(), org.mockito.kotlin.any(), org.mockito.kotlin.any())
+        }
+
+        // RTP 48000 at 48 kHz was heard at boot + 5 s; the frame reported is a second
+        // later on the RTP clock, so it was heard at boot + 6 s, whenever it is sent.
+        senderReportTcp.noteAudioTimestamp(48_000, 48_000, 5_000_000_000L)
+        fakeTime += 3_000
+        val later = RtpFrame(byteArrayOf(0x00, 0x00, 0x00), 96_000, 3, rtpTracks.trackAudio)
+        senderReportTcp.update(later)
+        withContext(Dispatchers.IO) {
+          verify(tcpSocket, times(1)).write(
+            body.capture(), org.mockito.kotlin.any(), org.mockito.kotlin.any())
+        }
+        val report = body.firstValue
+        fun field(at: Int) =
+          ((report[at].toLong() and 0xFF) shl 24) or
+          ((report[at + 1].toLong() and 0xFF) shl 16) or
+          ((report[at + 2].toLong() and 0xFF) shl 8) or
+          (report[at + 3].toLong() and 0xFF)
+        org.junit.Assert.assertEquals(1_700_000_006L + 2_208_988_800L, field(8))
+        org.junit.Assert.assertEquals(96_000L, field(16))
+      } finally {
+        BaseSenderReport.ntpClockProvider = previous
+      }
+    }
+  }
+
+  @Test
   fun `GIVEN multiple video or audio rtp frames WHEN update rtcp udp send THEN send only 1 of video and 1 of audio each 3 seconds`() = runTest {
     Utils.useStatics(listOf(timeUtilsMocked)) {
       val rtpTracks = RtpTracks()
       val senderReportUdp = SenderReportUdp(rtpTracks, udpSocket, udpSocket)
       senderReportUdp.setSocket(tcpSocket)
       senderReportUdp.setSSRC(0, 1)
+      senderReportUdp.noteAudioTimestamp(0, 48_000, 1_000_000_000L)
       val fakeFrameVideo = RtpFrame(byteArrayOf(0x00, 0x00, 0x00), 0, 3, rtpTracks.trackVideo)
       val fakeFrameAudio = RtpFrame(byteArrayOf(0x00, 0x00, 0x00), 0, 3, rtpTracks.trackAudio)
       (0..10).forEach { value ->

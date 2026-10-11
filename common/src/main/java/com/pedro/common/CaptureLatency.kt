@@ -63,8 +63,25 @@ object CaptureLatency {
         lastNs = if (latencyNs in 0..MAX_PLAUSIBLE_NS) latencyNs else 0
     }
 
+    /**
+     * Latest measured delay between a sound's capture and its encoded frame emerging,
+     * in nanoseconds, or 0 when unknown. The audio source stamps each frame with its
+     * first sample's capture instant on the encoder's clock, so unlike the video this
+     * is measured, not inferred; the same bound applies.
+     */
+    @Volatile
+    @JvmStatic
+    var audioNs: Long = 0
+        private set
+
+    @JvmStatic
+    fun reportAudio(latencyNs: Long) {
+        audioNs = if (latencyNs in 0..MAX_PLAUSIBLE_NS) latencyNs else 0
+    }
+
     @JvmStatic
     fun reset() {
         lastNs = 0
+        audioNs = 0
     }
 }
