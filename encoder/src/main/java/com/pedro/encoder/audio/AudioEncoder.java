@@ -19,10 +19,12 @@ package com.pedro.encoder.audio;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
+import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
 
+import com.pedro.common.CaptureLatency;
 import com.pedro.encoder.BaseEncoder;
 import com.pedro.encoder.Frame;
 import com.pedro.encoder.GetFrame;
@@ -31,6 +33,7 @@ import com.pedro.encoder.input.audio.GetMicrophoneData;
 import com.pedro.encoder.utils.CodecUtil;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.List;
 
 /**
@@ -47,6 +50,9 @@ public class AudioEncoder extends BaseEncoder implements GetMicrophoneData {
   public static final int inputSize = 8192;
   private boolean isStereo = true;
   private GetFrame getFrame;
+  // Input buffers the codec has offered while no PCM was waiting, filled as PCM arrives.
+  // Touched only on the callback thread.
+  private final ArrayDeque<Integer> freeInputs = new ArrayDeque<>();
   private long tsBuffer = 0;
 
   public AudioEncoder(GetAudioData getAudioData) {
@@ -119,6 +125,8 @@ public class AudioEncoder extends BaseEncoder implements GetMicrophoneData {
   public void start(boolean resetTs) {
     if (resetTs) tsBuffer = 0;
     shouldReset = resetTs;
+    // Buffer indices belong to the codec run that offered them.
+    if (handler != null) handler.post(freeInputs::clear);
     Log.i(TAG, "started");
   }
 
@@ -160,7 +168,15 @@ public class AudioEncoder extends BaseEncoder implements GetMicrophoneData {
   @Override
   protected boolean checkBuffer(@NonNull ByteBuffer byteBuffer,
       @NonNull MediaCodec.BufferInfo bufferInfo) {
-    return checkValidTimeStamp(bufferInfo);
+    boolean valid = checkValidTimeStamp(bufferInfo);
+    // The frame's pts counts from the encoder's start, and the source stamped it with
+    // its first sample's capture instant on this same clock (BOOTTIME), so start + pts
+    // is when the sound was heard. A Sender Report needs that, not the time it leaves.
+    if (valid && presentTimeUs > 0) {
+      CaptureLatency.reportAudio(SystemClock.elapsedRealtimeNanos()
+          - (presentTimeUs + bufferInfo.presentationTimeUs) * 1000L);
+    }
+    return valid;
   }
 
   @Override
@@ -176,8 +192,51 @@ public class AudioEncoder extends BaseEncoder implements GetMicrophoneData {
    */
   @Override
   public void inputPCMData(@NonNull Frame frame) {
-    if (running && !queue.offer(frame)) {
+    if (!running) return;
+    if (handler != null && getFrame == null) {
+      handler.post(() -> {
+        Integer index = freeInputs.poll();
+        if (index != null) fill(index, frame);
+        else if (!queue.offer(frame)) Log.i(TAG, "frame discarded");
+      });
+      return;
+    }
+    if (!queue.offer(frame)) {
       Log.i(TAG, "frame discarded");
+    }
+  }
+
+  /**
+   * An input buffer is never held waiting for PCM. The callbacks share one thread, and
+   * waiting here for the next block (85 ms) once per buffer the codec had free held every
+   * output callback queued behind them: the AAC left in bursts of about five blocks, which
+   * a live stream carries as 427 ms of sound at once, then nothing. The index is kept and
+   * {@link #inputPCMData} fills it when the PCM arrives.
+   */
+  @Override
+  public void inputAvailable(@NonNull MediaCodec mediaCodec, int inBufferIndex) {
+    if (getFrame != null || handler == null) {
+      super.inputAvailable(mediaCodec, inBufferIndex);
+      return;
+    }
+    Frame frame = queue.poll();
+    if (frame == null) freeInputs.add(inBufferIndex);
+    else fill(inBufferIndex, frame);
+  }
+
+  private void fill(int inBufferIndex, @NonNull Frame frame) {
+    MediaCodec mediaCodec = codec;
+    if (mediaCodec == null || !running) return;
+    try {
+      ByteBuffer byteBuffer = mediaCodec.getInputBuffer(inBufferIndex);
+      if (byteBuffer == null) return;
+      byteBuffer.clear();
+      int size = Math.max(0, Math.min(frame.getSize(), byteBuffer.remaining()));
+      byteBuffer.put(frame.getBuffer(), frame.getOffset(), size);
+      mediaCodec.queueInputBuffer(inBufferIndex, 0, size, calculatePts(frame, presentTimeUs), 0);
+    } catch (IllegalStateException | IndexOutOfBoundsException e) {
+      // A codec stopped or reset under a posted frame: that buffer is no longer ours.
+      Log.i(TAG, "Encoding error", e);
     }
   }
 

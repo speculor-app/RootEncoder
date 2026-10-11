@@ -67,6 +67,21 @@ class RtspSender(
    * construction rather than by assuming anything about shared origins.
    */
   override fun sendMediaFrame(mediaFrame: MediaFrame) {
+    if (mediaFrame.type == MediaFrame.Type.AUDIO) {
+      // The sound's own capture instant, the way the video's is taken below: the
+      // encoder measured how long ago this frame was heard. The RTP clock is the
+      // sample rate (AAC, G.711), derived exactly as the packetiser derives it.
+      val clock = commandsManager.sampleRate.toLong()
+      if (clock > 0) {
+        baseSenderReport?.noteAudioTimestamp(
+          mediaFrame.info.timestamp * clock / 1_000_000L,
+          clock,
+          SystemClock.elapsedRealtimeNanos() - CaptureLatency.audioNs,
+        )
+      }
+      super.sendMediaFrame(mediaFrame)
+      return
+    }
     if (mediaFrame.type != MediaFrame.Type.VIDEO) {
       super.sendMediaFrame(mediaFrame)
       return
