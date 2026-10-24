@@ -53,6 +53,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
 
+/** How long a preview attach or detach waits for the GL thread. */
+private const val PREVIEW_WAIT_MS = 1000L
+
 /**
  * Created by pedro on 14/3/22.
  */
@@ -438,14 +441,29 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   fun attachPreview(surface: Surface) {
-    if (surfaceManager.isReady) {
-      surfaceManagerPreview.release()
-      surfaceManagerPreview.eglSetup(surface, surfaceManager)
+    glAwait {
+      if (surfaceManager.isReady) {
+        surfaceManagerPreview.release()
+        surfaceManagerPreview.eglSetup(surface, surfaceManager)
+      }
     }
   }
 
   fun deAttachPreview() {
-    surfaceManagerPreview.release()
+    glAwait { surfaceManagerPreview.release() }
+  }
+
+  /**
+   * Preview surface work on the GL thread, waited for. The draw loop makes the
+   * preview surface current and swaps it there, so setting it up or releasing it
+   * from another thread races a frame in flight, and a caller that must be done
+   * with a window before its view goes (a SurfaceHolder's surfaceDestroyed) cannot
+   * be, until the GL thread has let go of it. Bounded, so a GL thread that never
+   * answers cannot hold the caller; run in place when there is no GL thread.
+   */
+  private fun glAwait(code: () -> Unit) {
+    val ex = executor
+    if (ex == null || ex.isShutdown || ex.isTerminated) code() else ex.secureSubmit(PREVIEW_WAIT_MS) { code() }
   }
 
   /**
